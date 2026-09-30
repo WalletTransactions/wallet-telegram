@@ -1,0 +1,80 @@
+openapi: 3.0.3
+info:
+  title: wallet-telegram
+  version: 0.1.0
+  description: |
+    Telegram-бот для ввода трат (org/docs/TODO_telegram_bot.md). Публичного
+    API у сервиса нет: с Telegram он общается исходящими запросами (long
+    polling getUpdates), с google-auth — через внутренний
+    `POST /internal/telegram/exchange`. Здесь — только служебные ручки.
+    Через wallet-gateway сервис не публикуется.
+servers:
+  - url: http://localhost:8086
+tags:
+  - name: service
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      summary: Liveness процесса
+      description: |
+        Не проверяет ни свою базу, ни Telegram, ни google-auth — их
+        недоступность видна в метриках `tg_poll_errors_total` и
+        `tg_last_poll_ok_timestamp_seconds`.
+      tags: [service]
+      responses:
+        "200":
+          description: Процесс жив
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string, example: ok}
+  /version:
+    get:
+      operationId: version
+      summary: Версия билда
+      tags: [service]
+      responses:
+        "200":
+          description: Версия и коммит
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  service: {type: string, example: wallet-telegram}
+                  version: {type: string, example: 0.1.0}
+                  git_commit: {type: string}
+  /metrics:
+    get:
+      operationId: metrics
+      summary: Метрики Prometheus
+      description: |
+        Кроме `build_info` и `http_requests_total` служебных ручек:
+        - `tg_updates_total{type}` — апдейты по типу обработки
+          (`start`, `help`, `unknown`, `other`, `ignored_non_private`,
+          `rejected_not_allowed`);
+        - `tg_update_failures_total{stage}` — апдейты, обработка которых упала
+          (апдейт пропущен);
+        - `tg_poll_errors_total{stage}` — ошибки цикла поллинга;
+        - `tg_api_errors_total{method}` — ошибки вызовов Bot API;
+        - `tg_last_poll_ok_timestamp_seconds` — время последнего успешного
+          getUpdates (для алерта «бот завис»).
+      tags: [service]
+      responses:
+        "200":
+          description: Prometheus text exposition 0.0.4
+          content:
+            text/plain: {schema: {type: string}}
+  /openapi.yaml:
+    get:
+      operationId: openapi
+      summary: Эта спецификация
+      tags: [service]
+      responses:
+        "200":
+          description: OpenAPI YAML
+          content:
+            application/yaml: {schema: {type: string}}

@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1
+#
+# Собирает и запускает wallet_telegram_integration_tests — НЕ образ сервиса.
+# Используется run_local.sh, вручную не нужен. Базовый образ и пакеты — как у
+# ../Containerfile (стадия deps), тот же приём, что у
+# wallet-api/tests_integration/Containerfile.
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        libssl-dev \
+        libpq-dev \
+        pkg-config \
+        tzdata \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY CMakeLists.txt VERSION openapi.yaml ./
+COPY src/ src/
+COPY third_party/ third_party/
+COPY tests/ tests/
+COPY tests_integration/ tests_integration/
+
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DWALLET_TELEGRAM_BUILD_TESTS=OFF \
+        -DWALLET_TELEGRAM_BUILD_INTEGRATION_TESTS=ON \
+    && cmake --build build --target wallet_telegram_integration_tests -j"$(nproc)"
+
+ENTRYPOINT ["/src/build/tests_integration/wallet_telegram_integration_tests"]
