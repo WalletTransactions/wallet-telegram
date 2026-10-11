@@ -5,6 +5,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Общий код сервисов (util/: jwt, jwks, crypto, log, metrics, ...) — копия
+# репозитория wallet-common, обновляется его scripts/vendor.sh; руками не править.
+set(WALLET_COMMON_DIR ${CMAKE_SOURCE_DIR}/third_party/wallet-common)
+
 # OpenSSL — HTTPS до api.telegram.org (httplib с CPPHTTPLIB_OPENSSL_SUPPORT)
 # и SHA-1 для UUIDv5 (src/util/uuid.cpp).
 # PostgreSQL — своя база бота (связки чатов, offset поллинга).
@@ -59,17 +63,18 @@ add_library(wallet_telegram_core STATIC
     src/sessions.cpp
     src/text.cpp
     src/db.cpp
-    src/util/dotenv.cpp
-    src/util/hex.cpp
-    src/util/log.cpp
-    src/util/metrics.cpp
+    ${WALLET_COMMON_DIR}/util/dotenv.cpp
+    ${WALLET_COMMON_DIR}/util/hex.cpp
+    ${WALLET_COMMON_DIR}/util/log.cpp
+    ${WALLET_COMMON_DIR}/util/metrics.cpp
     src/util/tz.cpp
-    src/util/uuid.cpp
+    ${WALLET_COMMON_DIR}/util/uuid.cpp
     src/wallet_client.cpp
 )
 target_include_directories(wallet_telegram_core PUBLIC
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/third_party
+    ${WALLET_COMMON_DIR}
     ${CMAKE_BINARY_DIR}/generated
 )
 target_compile_definitions(wallet_telegram_core PUBLIC
