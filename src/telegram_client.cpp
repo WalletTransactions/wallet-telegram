@@ -3,7 +3,7 @@
 #include <chrono>
 
 #include "httplib.h"
-#include "text.hpp"
+#include "expense/text.hpp"
 #include "util/metrics.hpp"
 
 using nlohmann::json;

@@ -1,7 +1,7 @@
-// Клиент wallet-report (org/docs/TODO_telegram_bot.md, §2, п. 10): бот читает
-// кошельки, балансы и операции теми же эндпоинтами, что веб-клиент, с
-// access-токеном пользователя (Bearer). Ходит напрямую на wallet-report по
-// внутренней сети — тот сам проверяет JWT по JWKS google-auth.
+// Клиент wallet-report: бот и wallet-ai читают кошельки, балансы и операции
+// теми же эндпоинтами, что веб-клиент, с access-токеном пользователя (Bearer).
+// Ходят напрямую на wallet-report по внутренней сети — тот сам проверяет JWT
+// по JWKS google-auth.
 #pragma once
 
 #include <memory>
@@ -28,6 +28,8 @@ public:
 // Percent-encoding значения query-параметра (RFC 3986 unreserved остаются).
 std::string url_encode(const std::string& value);
 
-std::unique_ptr<ReportsApi> make_http_api(const std::string& base_url);
+// error_metric — счётчик ошибок с лейблом kind (network, http_<код>): у
+// каждого сервиса свой (бот — tg_reports_errors_total, он в дашборде).
+std::unique_ptr<ReportsApi> make_http_api(const std::string& base_url, const std::string& error_metric);
 
 } // namespace reports

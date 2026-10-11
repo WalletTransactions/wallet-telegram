@@ -8,8 +8,8 @@
 
 #include "callback.hpp"
 #include "card.hpp"
-#include "parser/strict.hpp"
-#include "text.hpp"
+#include "expense/strict.hpp"
+#include "expense/text.hpp"
 #include "util/log.hpp"
 #include "util/metrics.hpp"
 #include "util/tz.hpp"
@@ -109,35 +109,6 @@ bool looks_like_expense(const std::string& text) {
     if (std::isdigit(static_cast<unsigned char>(s[0])) != 0 || s[0] == '$') return true;
     return s.compare(0, 3, "\xE2\x82\xAC") == 0    // €
            || s.compare(0, 3, "\xE2\x82\xBD") == 0; // ₽
-}
-
-int precision_of(const std::string& s) {
-    if (s.empty() || s.size() > 2 || !std::all_of(s.begin(), s.end(), [](unsigned char c) {
-            return std::isdigit(c) != 0;
-        })) {
-        return 2;
-    }
-    return std::stoi(s);
-}
-
-// Ответ GET /api/reports/accounts (без kind — кошельки и категории разом).
-// Системные категории (Transfer, Transfer commission) — не для трат.
-resolver::Accounts parse_accounts(const json& body) {
-    resolver::Accounts out;
-    auto it = body.find("accounts");
-    if (it == body.end() || !it->is_array()) return out;
-    for (const auto& a : *it) {
-        std::string uuid = str(a, "uuid");
-        if (uuid.empty()) continue;
-        std::string kind = str(a, "kind");
-        if (kind == "wallet") {
-            out.wallets.push_back(
-                {uuid, str(a, "name"), str(a, "iso_code"), str(a, "symbol"), precision_of(str(a, "precision"))});
-        } else if (kind == "category" && a.value("system_kind", 0) == 0) {
-            out.categories.push_back({uuid, str(a, "name")});
-        }
-    }
-    return out;
 }
 
 const char* parse_error_text(parser::ParseError::Reason reason) {
@@ -505,7 +476,7 @@ const resolver::Accounts* Bot::accounts(const telegram::Update& update, const li
     auto body = report_get(update, link, "/api/reports/accounts");
     if (!body) return nullptr;
     CachedAccounts& slot = accounts_cache_[link.tg_user_id];
-    slot.accounts = parse_accounts(*body);
+    slot.accounts = resolver::parse_accounts(*body);
     slot.fetched_at = now();
     return &slot.accounts;
 }

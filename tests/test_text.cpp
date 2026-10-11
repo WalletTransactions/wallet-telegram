@@ -1,5 +1,5 @@
 // text.hpp (имена, суммы, даты) и util/tz.hpp.
-#include "text.hpp"
+#include "expense/text.hpp"
 
 #include <cstdlib>
 #include <ctime>

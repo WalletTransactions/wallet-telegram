@@ -1,5 +1,5 @@
 // Чистые функции текста для ответов бота и сопоставления имён — без сети и
-// базы, покрыты tests/test_text.cpp.
+// базы, покрыты wallet-telegram/tests/test_text.cpp.
 #pragma once
 
 #include <string>

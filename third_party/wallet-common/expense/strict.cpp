@@ -1,9 +1,10 @@
-#include "parser/strict.hpp"
+#include "expense/strict.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 
-#include "text.hpp"
+#include "expense/text.hpp"
 
 namespace parser {
 
@@ -44,7 +45,8 @@ std::string normalize_currency(const std::string& s) {
     return n;
 }
 
-// ISO-код валюты, которую означает слово, или пусто.
+} // namespace
+
 std::string currency_of(const std::string& token, const Names& names) {
     std::string n = normalize_currency(token);
     if (n.empty()) return {};
@@ -67,6 +69,8 @@ std::string currency_of(const std::string& token, const Names& names) {
     }
     return {};
 }
+
+namespace {
 
 // Токены по пробелам, включая неразрывный (U+00A0) и узкий неразрывный
 // (U+202F) — так «1 200» из скопированной суммы тоже делится на группы.
@@ -297,6 +301,77 @@ const char* reason_name(ParseError::Reason reason) {
     return "unknown";
 }
 
+std::optional<Amount> parse_amount(const std::string& core, ParseError::Reason* why) {
+    auto fail_amount = [why](ParseError::Reason r) -> std::optional<Amount> {
+        if (why != nullptr) *why = r;
+        return std::nullopt;
+    };
+    std::size_t sep = core.find_first_of(".,");
+    if (sep != std::string::npos && core.find_first_of(".,", sep + 1) != std::string::npos) {
+        return fail_amount(ParseError::Reason::BadAmount); // "1,200.50" — какой из них десятичный?
+    }
+    std::string int_part = sep == std::string::npos ? core : core.substr(0, sep);
+    std::string frac_part = sep == std::string::npos ? std::string{} : core.substr(sep + 1);
+    if (!all_digits(int_part) || (sep != std::string::npos && !all_digits(frac_part))) {
+        return fail_amount(ParseError::Reason::BadAmount);
+    }
+    while (int_part.size() > 1 && int_part[0] == '0') int_part.erase(0, 1);
+    while (!frac_part.empty() && frac_part.back() == '0') frac_part.pop_back();
+    // numeric(20,8) в operation.amount: 12 знаков до точки, 8 после.
+    if (int_part.size() > 12 || frac_part.size() > 8) return fail_amount(ParseError::Reason::BadAmount);
+    if (int_part == "0" && frac_part.empty()) return fail_amount(ParseError::Reason::ZeroAmount);
+    Amount a;
+    a.amount = frac_part.empty() ? int_part : int_part + "." + frac_part;
+    a.fraction_digits = static_cast<int>(frac_part.size());
+    return a;
+}
+
+std::vector<std::string> amounts_in_text(const std::string& text, const Names& names) {
+    std::vector<std::string> out;
+    auto add = [&out](std::string core) {
+        while (!core.empty() && (core.back() == '.' || core.back() == ',')) core.pop_back(); // «450,» в конце фразы
+        if (auto a = parse_amount(core)) {
+            if (std::find(out.begin(), out.end(), a->amount) == out.end()) out.push_back(a->amount);
+        }
+    };
+    std::vector<std::string> tokens = tokenize(text);
+    for (std::size_t i = 0; i < tokens.size(); ++i) {
+        AmountToken t = split_amount_token(tokens[i]);
+        if (t.core.find_first_of("0123456789") == std::string::npos) continue;
+        add(t.core);
+        // Группы тысяч, как в parse_strict: «1 200 000,50». Каждое число
+        // по отдельности уже добавлено — «кофе 200 450» даёт и 200, и 450, и
+        // 200450: для проверки «есть в тексте» лишние кандидаты не мешают.
+        if (!t.suffix.empty() || !all_digits(t.core) || t.core.size() > 3) continue;
+        std::string core = t.core;
+        for (std::size_t j = i + 1; j < tokens.size(); ++j) {
+            AmountToken g = split_amount_token(tokens[j]);
+            if (!g.prefix.empty() || !is_thousands_group(g.core)) break;
+            if (!g.suffix.empty() && currency_of(g.suffix, names).empty()) break;
+            core += g.core;
+            add(core);
+            if (!all_digits(g.core) || !g.suffix.empty()) break;
+        }
+    }
+    return out;
+}
+
+DateCheck check_date(const std::string& ymd, const std::string& today, int max_age_days) {
+    Ymd v;
+    Ymd t;
+    if (!parse_iso_date(ymd, v) || !parse_iso_date(today, t)) return DateCheck::Bad;
+    if (t < v) return DateCheck::Future;
+    if (days_from_civil(t) - days_from_civil(v) > max_age_days) return DateCheck::TooOld;
+    return DateCheck::Ok;
+}
+
+std::string datetime_for(const std::string& ymd, const Now& now) {
+    Ymd v;
+    Ymd t;
+    if (!parse_iso_date(ymd, v) || !parse_iso_date(now.date, t)) return {};
+    return format_ymd(v) + " " + (v < t ? std::string("12:00:00") : now.time);
+}
+
 Result parse_strict(const std::string& text, const Names& names, const Now& now) {
     Ymd today;
     if (!parse_iso_date(now.date, today)) return fail(ParseError::Reason::BadDate);
@@ -343,22 +418,11 @@ Result parse_strict(const std::string& text, const Names& names, const Now& now)
         e.currency_hint = cur;
     }
 
-    std::size_t sep = core.find_first_of(".,");
-    if (sep != std::string::npos && core.find_first_of(".,", sep + 1) != std::string::npos) {
-        return fail(ParseError::Reason::BadAmount); // "1,200.50" — какой из них десятичный?
-    }
-    std::string int_part = sep == std::string::npos ? core : core.substr(0, sep);
-    std::string frac_part = sep == std::string::npos ? std::string{} : core.substr(sep + 1);
-    if (!all_digits(int_part) || (sep != std::string::npos && !all_digits(frac_part))) {
-        return fail(ParseError::Reason::BadAmount);
-    }
-    while (int_part.size() > 1 && int_part[0] == '0') int_part.erase(0, 1);
-    while (!frac_part.empty() && frac_part.back() == '0') frac_part.pop_back();
-    // numeric(20,8) в operation.amount: 12 знаков до точки, 8 после.
-    if (int_part.size() > 12 || frac_part.size() > 8) return fail(ParseError::Reason::BadAmount);
-    if (int_part == "0" && frac_part.empty()) return fail(ParseError::Reason::ZeroAmount);
-    e.amount = frac_part.empty() ? int_part : int_part + "." + frac_part;
-    e.fraction_digits = static_cast<int>(frac_part.size());
+    ParseError::Reason amount_error = ParseError::Reason::BadAmount;
+    auto amount = parse_amount(core, &amount_error);
+    if (!amount) return fail(amount_error);
+    e.amount = amount->amount;
+    e.fraction_digits = amount->fraction_digits;
 
     // Валюта отдельным словом сразу после суммы.
     if (e.currency_hint.empty() && i < tokens.size()) {

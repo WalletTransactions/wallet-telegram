@@ -30,7 +30,7 @@
 #include "docs.hpp"
 #include "httplib.h"
 #include "link_repo.hpp"
-#include "reports_client.hpp"
+#include "clients/reports_client.hpp"
 #include "telegram_client.hpp"
 #include "util/dotenv.hpp"
 #include "util/log.hpp"
@@ -142,7 +142,7 @@ int main() {
     auto tg = telegram::make_http_api(strip_trailing_slash(env_or("TELEGRAM_API_URL", "https://api.telegram.org")),
                                       bot_token);
     auto auth_api = auth::make_http_api(auth_service_url, service_secret);
-    auto reports_api = reports::make_http_api(wallet_report_url);
+    auto reports_api = reports::make_http_api(wallet_report_url, "tg_reports_errors_total");
     auto wallet_api = wallet::make_http_api(wallet_api_url);
     bot::Bot bot(*tg, *auth_api, *reports_api, *wallet_api, store, config);
 

@@ -4,7 +4,7 @@
 //
 // Чистая функция: текст, имена пользователя и «сейчас» в его поясе →
 // разобранные поля. Без сети, базы и часов — таблица тестов в
-// tests/test_strict.cpp.
+// wallet-telegram/tests/test_strict.cpp.
 //
 // Парсер только режет текст на поля. Какой это счёт (uuid), что делать с
 // неоднозначностью и подходит ли валюта кошельку, решает resolver (§3.2).
@@ -12,6 +12,7 @@
 // комментарием видна только по списку имён (самое длинное совпадение).
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -77,5 +78,38 @@ struct Result {
 };
 
 Result parse_strict(const std::string& text, const Names& names, const Now& now);
+
+// --- Части строгого разбора для проверки ответа LLM (wallet-ai, задание
+// parse_expense, «Шаг 9 подробно», 9c.5). Те же правила, что у parse_strict.
+
+struct Amount {
+    std::string amount;     // как ParsedExpense::amount: "1200.5"
+    int fraction_digits = 0;
+};
+
+// Число без валюты и пробелов: "1200,50", "350", "12.5". Тот же разбор, что у
+// суммы в parse_strict: один десятичный разделитель, ≤ 12 знаков до и ≤ 8
+// после. nullopt — не число, why — BadAmount или ZeroAmount.
+std::optional<Amount> parse_amount(const std::string& core, ParseError::Reason* why = nullptr);
+
+// Все суммы, что встречаются в тексте, нормализованные как Amount::amount:
+// "1 200,50 продукты, $12 и 350₽" -> {"1200.5", "12", "350"}. Группы тысяч
+// склеиваются, валюта вокруг числа отрезается. Даты ("24.09") тоже попадут
+// — для проверки «сумма есть в тексте» это не мешает.
+std::vector<std::string> amounts_in_text(const std::string& text, const Names& names);
+
+// ISO-код валюты, которую означает слово ("евро", "₽", "usd", символ или
+// код валюты кошелька), или пусто.
+std::string currency_of(const std::string& word, const Names& names);
+
+enum class DateCheck { Ok, Bad, Future, TooOld };
+
+// "YYYY-MM-DD" против сегодняшней даты пользователя: Bad — не дата, Future —
+// позже сегодня, TooOld — раньше чем max_age_days назад.
+DateCheck check_date(const std::string& ymd, const std::string& today, int max_age_days);
+
+// Момент операции, как в ParsedExpense::datetime: сегодня — текущее время,
+// прошедший день — 12:00.
+std::string datetime_for(const std::string& ymd, const Now& now);
 
 } // namespace parser

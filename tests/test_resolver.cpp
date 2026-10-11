@@ -1,6 +1,6 @@
 // Resolver (resolver.hpp) — таблица выбора кошелька и категории из
 // org/docs/TODO_telegram_bot.md, §3.2 и «Подшаг 2 подробно».
-#include "resolver.hpp"
+#include "expense/resolver.hpp"
 
 #include "test_framework.hpp"
 

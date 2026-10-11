@@ -57,11 +57,11 @@ add_library(wallet_telegram_core STATIC
     src/telegram_client.cpp
     src/auth_client.cpp
     src/link_repo.cpp
-    src/parser/strict.cpp
-    src/reports_client.cpp
-    src/resolver.cpp
+    ${WALLET_COMMON_DIR}/expense/strict.cpp
+    ${WALLET_COMMON_DIR}/clients/reports_client.cpp
+    ${WALLET_COMMON_DIR}/expense/resolver.cpp
     src/sessions.cpp
-    src/text.cpp
+    ${WALLET_COMMON_DIR}/expense/text.cpp
     src/db.cpp
     ${WALLET_COMMON_DIR}/util/dotenv.cpp
     ${WALLET_COMMON_DIR}/util/hex.cpp

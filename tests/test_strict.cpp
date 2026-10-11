@@ -1,6 +1,6 @@
 // Строгий формат траты (parser/strict.hpp) и UUID v5 (util/uuid.hpp) —
 // таблица разбора, основной артефакт шага 6 (org/docs/TODO_telegram_bot.md).
-#include "parser/strict.hpp"
+#include "expense/strict.hpp"
 
 #include "test_framework.hpp"
 #include "util/uuid.hpp"

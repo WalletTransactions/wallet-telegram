@@ -196,7 +196,7 @@ TEST(telegram_bot_writes_expense_end_to_end) {
     FakeTelegram tg;
     MemoryStore store;
     auto auth_api = auth::make_http_api(e.auth_url, e.service_secret);
-    auto reports_api = reports::make_http_api(e.report_url);
+    auto reports_api = reports::make_http_api(e.report_url, "tg_reports_errors_total");
     auto wallet_api = wallet::make_http_api(e.api_url);
     bot::Config config;
     config.bot_username = "WalletTransaction_it_bot";

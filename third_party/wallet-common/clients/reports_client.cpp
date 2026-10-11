@@ -1,4 +1,4 @@
-#include "reports_client.hpp"
+#include "clients/reports_client.hpp"
 
 #include <cctype>
 #include <cstdio>
@@ -15,11 +15,12 @@ namespace {
 
 class HttpReportsApi final : public ReportsApi {
 public:
-    explicit HttpReportsApi(const std::string& base_url) : base_url_(base_url) {}
+    HttpReportsApi(const std::string& base_url, const std::string& error_metric)
+        : base_url_(base_url), error_metric_(error_metric) {}
 
     Response get(const std::string& path_and_query, const std::string& access_token) override {
-        // Клиент на вызов, как в auth_client.cpp: поток один, запросов мало,
-        // а у httplib::Client нет гарантий на переиспользование после ошибок.
+        // Клиент на вызов: запросов мало, а у httplib::Client нет гарантий на
+        // переиспользование после ошибок.
         httplib::Client client(base_url_);
         client.set_connection_timeout(5, 0);
         client.set_read_timeout(15, 0);
@@ -31,15 +32,14 @@ public:
         Response out;
         auto res = client.Get(path_and_query, headers);
         if (!res) {
-            metrics::inc_counter("tg_reports_errors_total", "Ошибки запросов бота к wallet-report.", "kind",
-                                 "network");
+            metrics::inc_counter(error_metric_, "Ошибки запросов к wallet-report.", "kind", "network");
             out.error = "wallet-report недоступен: " + httplib::to_string(res.error());
             return out;
         }
         out.status = res->status;
         out.body = json::parse(res->body, nullptr, /*allow_exceptions=*/false);
         if (res->status != 200) {
-            metrics::inc_counter("tg_reports_errors_total", "Ошибки запросов бота к wallet-report.", "kind",
+            metrics::inc_counter(error_metric_, "Ошибки запросов к wallet-report.", "kind",
                                  "http_" + std::to_string(res->status));
             out.error = "HTTP " + std::to_string(res->status);
             if (out.body.is_object() && out.body.contains("error") && out.body["error"].is_string()) {
@@ -54,6 +54,7 @@ public:
 
 private:
     std::string base_url_;
+    std::string error_metric_;
 };
 
 } // namespace
@@ -72,8 +73,8 @@ std::string url_encode(const std::string& value) {
     return out;
 }
 
-std::unique_ptr<ReportsApi> make_http_api(const std::string& base_url) {
-    return std::make_unique<HttpReportsApi>(base_url);
+std::unique_ptr<ReportsApi> make_http_api(const std::string& base_url, const std::string& error_metric) {
+    return std::make_unique<HttpReportsApi>(base_url, error_metric);
 }
 
 } // namespace reports

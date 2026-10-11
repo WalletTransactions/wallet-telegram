@@ -1,8 +1,10 @@
-#include "resolver.hpp"
+#include "expense/resolver.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <unordered_set>
 
-#include "text.hpp"
+#include "expense/text.hpp"
 
 namespace resolver {
 
@@ -181,6 +183,43 @@ parser::Names names_for_parser(const Accounts& a) {
         }
     }
     return names;
+}
+
+namespace {
+
+std::string str(const nlohmann::json& obj, const char* key) {
+    auto it = obj.find(key);
+    if (it == obj.end() || !it->is_string()) return {};
+    return it->get<std::string>();
+}
+
+int precision_of(const std::string& s) {
+    if (s.empty() || s.size() > 2 || !std::all_of(s.begin(), s.end(), [](unsigned char c) {
+            return std::isdigit(c) != 0;
+        })) {
+        return 2;
+    }
+    return std::stoi(s);
+}
+
+} // namespace
+
+Accounts parse_accounts(const nlohmann::json& body) {
+    Accounts out;
+    auto it = body.find("accounts");
+    if (it == body.end() || !it->is_array()) return out;
+    for (const auto& a : *it) {
+        std::string uuid = str(a, "uuid");
+        if (uuid.empty()) continue;
+        std::string kind = str(a, "kind");
+        if (kind == "wallet") {
+            out.wallets.push_back(
+                {uuid, str(a, "name"), str(a, "iso_code"), str(a, "symbol"), precision_of(str(a, "precision"))});
+        } else if (kind == "category" && a.value("system_kind", 0) == 0) {
+            out.categories.push_back({uuid, str(a, "name")});
+        }
+    }
+    return out;
 }
 
 } // namespace resolver

@@ -3,7 +3,7 @@
 #include <algorithm>
 
 #include "callback.hpp"
-#include "text.hpp"
+#include "expense/text.hpp"
 
 namespace card {
 

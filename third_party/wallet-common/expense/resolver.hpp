@@ -5,14 +5,15 @@
 //
 // Чистая функция, как и парсер: разобранная трата, справочник счетов и
 // кошелёк по умолчанию → решение. Без сети и базы — таблица тестов в
-// tests/test_resolver.cpp.
+// wallet-telegram/tests/test_resolver.cpp.
 #pragma once
 
 #include <optional>
 #include <string>
 #include <vector>
 
-#include "parser/strict.hpp"
+#include "expense/strict.hpp"
+#include "nlohmann/json.hpp"
 
 namespace resolver {
 
@@ -86,5 +87,9 @@ bool fits_precision(const parser::ParsedExpense& e, const Wallet& w);
 // Имена и валюты для parse_strict: без имён парсер не отделит многословную
 // категорию от комментария.
 parser::Names names_for_parser(const Accounts& a);
+
+// Ответ GET /api/reports/accounts (без kind — кошельки и категории разом).
+// Системные категории (Transfer, Transfer commission) — не для трат.
+Accounts parse_accounts(const nlohmann::json& body);
 
 } // namespace resolver
