@@ -53,6 +53,26 @@ Telegram-бот для ввода трат. Полный план — [../TODO_t
   `/sync/pull`, устройство — Telegram.
 - Справочник кошельков и категорий (`GET /api/reports/accounts`) кешируется
   на пользователя на 60 с; `/wallets` и `/categories` читают его свежим.
+- **Трата свободным текстом через `wallet-ai`** (`WALLET_AI_URL`; пусто — ИИ
+  выключен): «кофе 200», «вчера такси 450 с тинькоффа». Бот создаёт задание
+  `parse_expense` (`POST /api/ai/jobs`, ключ `tg:<tg_user_id>:<update_id>`),
+  сразу отвечает «Разбираю…» и правит это сообщение в обычную карточку с
+  пометкой «Понял из текста — проверьте перед записью»; запись — та же.
+  ИИ зовётся только там, где строгий формат сдался (таблица 9c в
+  `org/docs/TODO_telegram_bot.md`):
+  - текст не с суммы, но с цифрой;
+  - категория не нашлась («350 потратил на кофе»);
+  - сумма не разобралась («1,200.50»).
+
+  Сообщения без цифры и длиннее 300 байт идут без ИИ. Если ИИ не помог
+  (выключен, занят, не нашёл трату, ответ не прошёл проверки, нет итога за
+  90 с), бот показывает ровно то, что ответил бы без ИИ.
+
+  Итог задания бот забирает в том же потоке поллинга: пока задания есть,
+  `getUpdates` ждёт 1 с, а после него идёт короткий `GET /api/ai/jobs/{id}`.
+  HTTP-клиент Telegram, база и черновики однопоточны. Ожидания хранятся в
+  памяти: рестарт бота во время разбора оставит «Разбираю…» без итога —
+  пользователь напишет ещё раз.
 
 ## Устройство
 
@@ -126,6 +146,11 @@ wallet-api), с фейковым Telegram: `bash wallet-telegram/tests_integrati
 | `tg_telegram_api_duration_seconds{method}` | длительность вызовов Bot API, кроме `getUpdates` |
 | `tg_api_errors_total{method}`, `tg_wallet_api_errors_total{kind}`, `tg_reports_errors_total{kind}` | ошибки внешних вызовов |
 | `tg_last_poll_ok_timestamp_seconds` | время последнего успешного `getUpdates` |
+| `tg_ai_job_total{result}` | создание задания wallet-ai: `created`, `unavailable`, `busy`, `error`, ... |
+| `tg_ai_outcome_total{outcome}` | итог: `draft`, `not_expense`, `rejected`, `failed`, `expired`, `gave_up`, ... |
+| `tg_ai_wait_seconds{outcome}` | от «Разбираю…» до итога |
+| `tg_expense_source_total{source}` | черновики по источнику: `strict`, `llm` |
+| `tg_ai_errors_total{kind}` | ошибки запросов к wallet-ai |
 
 Суммы, имена и тексты в метрики не попадают — лейблы только из литералов кода.
 

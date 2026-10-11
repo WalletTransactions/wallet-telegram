@@ -56,6 +56,9 @@ const char* const kUnlinked =
     "Бот отключён от кошелька. Подключить снова: веб-кабинет → Доступ и приглашения → Telegram-бот.";
 const char* const kNoWallets = "Кошельков пока нет — заведите их в приложении.";
 const char* const kDraftStale = "Черновик устарел — отправьте трату ещё раз.";
+const char* const kAiParsing = "Разбираю…";
+const char* const kAiNotUnderstood = "Не понял. Пример: 350 продукты @тинькофф вчера";
+const char* const kHelpAi = "Можно и своими словами: «кофе 200», «вчера такси 450 с тинькоффа».\n";
 } // namespace texts
 
 namespace {
@@ -109,6 +112,34 @@ bool looks_like_expense(const std::string& text) {
     if (std::isdigit(static_cast<unsigned char>(s[0])) != 0 || s[0] == '$') return true;
     return s.compare(0, 3, "\xE2\x82\xAC") == 0    // €
            || s.compare(0, 3, "\xE2\x82\xBD") == 0; // ₽
+}
+
+// Звать ли ИИ: есть цифра (без суммы трату не записать — «кофе двести» не
+// разбираем) и сообщение короткое.
+bool ai_eligible(const std::string& text) {
+    if (text.size() > kAiMaxTextBytes) return false;
+    return std::any_of(text.begin(), text.end(), [](unsigned char c) { return std::isdigit(c) != 0; });
+}
+
+// result.expense задания parse_expense — тот же ParsedExpense, что у строгого
+// формата (wallet-common/expense), уже проверенный wallet-ai.
+parser::ParsedExpense expense_from_json(const json& e) {
+    parser::ParsedExpense out;
+    auto s = [&e](const char* k) { return e.contains(k) && e[k].is_string() ? e[k].get<std::string>() : std::string{}; };
+    out.amount = s("amount");
+    out.fraction_digits = e.contains("fraction_digits") && e["fraction_digits"].is_number_integer()
+                              ? e["fraction_digits"].get<int>()
+                              : 0;
+    out.currency_hint = s("currency_hint");
+    out.category = s("category");
+    out.wallet = s("wallet");
+    out.datetime = s("datetime");
+    out.comment = s("comment");
+    return out;
+}
+
+void count_ai_job(const char* result) {
+    metrics::inc_counter("tg_ai_job_total", "Создание заданий wallet-ai по исходу.", "result", result);
 }
 
 const char* parse_error_text(parser::ParseError::Reason reason) {
@@ -338,7 +369,15 @@ void Bot::handle(const telegram::Update& update) {
     }
     if (cmd.name == "help") {
         count_update("help");
-        reply(update, texts::kHelp);
+        std::string help = texts::kHelp;
+        if (ai_ != nullptr) {
+            auto link = store_.find_link(update.from_id);
+            // Строка про свободный текст — только когда ИИ правда работает.
+            static const std::string kAfter = "запишу после «✓ Записать».\n";
+            std::size_t at = help.find(kAfter);
+            if (link && at != std::string::npos && ai_enabled_for(*link)) help.insert(at + kAfter.size(), texts::kHelpAi);
+        }
+        reply(update, help);
         return;
     }
 
@@ -370,6 +409,21 @@ void Bot::handle(const telegram::Update& update) {
         }
         applog::set_user(link->user_id);
         handle_expense(update, *link);
+        return;
+    }
+
+    // Не с суммы, но цифра есть («кофе 200») — свободным текстом через ИИ.
+    if (cmd.name.empty() && ai_ != nullptr && ai_eligible(update.text)) {
+        count_update("expense_text");
+        auto link = store_.find_link(update.from_id);
+        if (!link) {
+            reply(update, texts::kNotLinked);
+            return;
+        }
+        applog::set_user(link->user_id);
+        AiFallback f;
+        f.kind = AiFallback::Kind::NotUnderstood;
+        try_ai(update, *link, f);
         return;
     }
 
@@ -682,6 +736,7 @@ void Bot::handle_expense(const telegram::Update& update, const links::Link& link
     std::string today = tz::local_date(link.tz, t);
     parser::Result parsed =
         parser::parse_strict(update.text, resolver::names_for_parser(*acc), {today, tz::local_time_seconds(link.tz, t)});
+    bool ai = ai_ != nullptr && ai_eligible(update.text);
     if (!parsed.ok) {
         // Суммы и текст — не в лог (§3.4): только причина.
         applog::info("expense parse failed", {{"event", "tg_expense_parse_failed"},
@@ -690,43 +745,243 @@ void Bot::handle_expense(const telegram::Update& update, const links::Link& link
         count_expense("parse_failed");
         metrics::inc_counter("tg_parse_fail_total", "Трата не разобрана, по причине.", "reason",
                              parser::reason_name(parsed.error.reason));
+        // Сумму не разобрал («1,200.50») — пусть попробует ИИ; ноль, дата —
+        // заданы явно и явно неверны, ИИ тут не поможет (таблица 9c).
+        if (ai && parsed.error.reason == parser::ParseError::Reason::BadAmount) {
+            AiFallback f;
+            f.kind = AiFallback::Kind::ParseError;
+            f.reason = parsed.error.reason;
+            try_ai(update, link, f);
+            return;
+        }
         reply(update, parse_error_text(parsed.error.reason));
         return;
     }
-    const parser::ParsedExpense& e = parsed.expense;
-    resolver::Resolution r = resolver::resolve(e, *acc, link.default_wallet_uuid);
+    // Категория не нашлась («350 потратил на кофе» — категория «потратил»):
+    // строгий формат сдался, пусть попробует ИИ; не выйдет — прежние кнопки.
+    if (ai) {
+        resolver::Resolution r = resolver::resolve(parsed.expense, *acc, link.default_wallet_uuid);
+        if (r.category.kind == resolver::CategoryPick::Kind::Ask &&
+            r.category.why == resolver::CategoryPick::Why::NotFound) {
+            AiFallback f;
+            f.kind = AiFallback::Kind::StrictDraft;
+            f.expense = parsed.expense;
+            try_ai(update, link, f);
+            return;
+        }
+    }
+    start_draft(update, link, parsed.expense, *acc, /*from_text=*/false, /*edit_message_id=*/0);
+}
+
+void Bot::start_draft(const telegram::Update& update, const links::Link& link, const parser::ParsedExpense& e,
+                      const resolver::Accounts& acc, bool from_text, std::int64_t edit_message_id) {
+    std::time_t t = now();
+    std::string today = tz::local_date(link.tz, t);
+    resolver::Resolution r = resolver::resolve(e, acc, link.default_wallet_uuid);
 
     applog::info("expense resolved", {{"event", "tg_expense_resolved"},
                                       {"tg_user_id", link.tg_user_id},
+                                      {"source", from_text ? "llm" : "strict"},
                                       {"category", category_why_name(r.category)},
                                       {"wallet", wallet_why_name(r.wallet)}});
+    metrics::inc_counter("tg_expense_source_total", "Черновики трат по источнику разбора.", "source",
+                         from_text ? "llm" : "strict");
 
     if (r.wallet.kind == resolver::WalletPick::Kind::Reject) {
         count_expense("rejected");
         if (r.wallet.why == resolver::WalletPick::Why::NoWallets) {
-            reply(update, texts::kNoWallets);
+            respond(update, texts::kNoWallets, edit_message_id);
         } else {
-            reply(update, "Нет кошелька в " + e.currency_hint + " — конвертации нет. Кошельки — /wallets");
+            respond(update, "Нет кошелька в " + e.currency_hint + " — конвертации нет. Кошельки — /wallets",
+                    edit_message_id);
         }
         return;
     }
     if (r.wallet.kind == resolver::WalletPick::Kind::Found && !resolver::fits_precision(e, r.wallet.found)) {
         count_expense("rejected");
-        reply(update, precision_text(r.wallet.found));
+        respond(update, precision_text(r.wallet.found), edit_message_id);
         return;
     }
 
-    drafts::Draft d = make_draft(e, r, *acc, link.default_wallet_uuid);
+    drafts::Draft d = make_draft(e, r, acc, link.default_wallet_uuid);
     d.id = std::to_string(update.update_id);
     d.tg_user_id = link.tg_user_id;
     d.user_id = link.user_id;
     d.chat_id = update.chat_id;
     d.created_at = t;
+    d.from_text = from_text;
     count_expense(d.step == drafts::Draft::Step::Card ? "resolved" : "ambiguous");
     card::Message m = card::render(d, link.default_wallet_uuid, today, tz::local_date(link.tz, t, -1));
-    // Сначала сообщение, потом черновик: без message_id править нечего.
-    d.message_id = tg_.send_message(update.chat_id, text::truncate_utf8(m.text, kMaxMessageBytes), m.keyboard);
+    if (edit_message_id != 0) {
+        tg_.edit_message(update.chat_id, edit_message_id, text::truncate_utf8(m.text, kMaxMessageBytes), m.keyboard);
+        d.message_id = edit_message_id;
+    } else {
+        // Сначала сообщение, потом черновик: без message_id править нечего.
+        d.message_id = tg_.send_message(update.chat_id, text::truncate_utf8(m.text, kMaxMessageBytes), m.keyboard);
+    }
     drafts_.put(std::move(d), t);
+}
+
+void Bot::respond(const telegram::Update& update, const std::string& text, std::int64_t edit_message_id) {
+    if (edit_message_id != 0) {
+        tg_.edit_message(update.chat_id, edit_message_id, text::truncate_utf8(text, kMaxMessageBytes), {});
+    } else {
+        reply(update, text);
+    }
+}
+
+void Bot::run_fallback(const telegram::Update& update, const links::Link& link, const AiFallback& fallback,
+                       std::int64_t edit_message_id) {
+    switch (fallback.kind) {
+    case AiFallback::Kind::NotUnderstood:
+        respond(update, texts::kAiNotUnderstood, edit_message_id);
+        return;
+    case AiFallback::Kind::ParseError:
+        respond(update, parse_error_text(fallback.reason), edit_message_id);
+        return;
+    case AiFallback::Kind::StrictDraft: {
+        const resolver::Accounts* acc = accounts(update, link, /*fresh=*/false);
+        if (acc == nullptr) return; // ответ уже отправлен
+        start_draft(update, link, fallback.expense, *acc, /*from_text=*/false, edit_message_id);
+        return;
+    }
+    }
+}
+
+void Bot::try_ai(const telegram::Update& update, const links::Link& link, const AiFallback& fallback) {
+    std::time_t t = now();
+    json input = {{"text", update.text},
+                  {"now", {{"date", tz::local_date(link.tz, t)}, {"time", tz::local_time_seconds(link.tz, t)}}},
+                  {"default_wallet_uuid", link.default_wallet_uuid}};
+    // Повторная доставка того же апдейта — то же задание, LLM второй раз не зовётся.
+    std::string key = "tg:" + std::to_string(link.tg_user_id) + ":" + std::to_string(update.update_id);
+
+    ai::CreateResult created;
+    bool called = with_token(update, link, [&](const std::string& token) {
+        created = ai_->create_parse_expense(token, input, key);
+        return created.status == ai::CreateResult::Status::Unauthorized;
+    });
+    if (!called) return; // пользователю уже ответили (сессия отозвана, google-auth недоступен)
+    count_ai_job(ai::to_string(created.status));
+    if (created.status != ai::CreateResult::Status::Created) {
+        // ИИ выключен, занят или недоступен — ответ, как без него, сразу.
+        applog::info("ai job not created", {{"event", "tg_ai_job_not_created"},
+                                            {"tg_user_id", link.tg_user_id},
+                                            {"status", ai::to_string(created.status)},
+                                            {"error", created.error}});
+        run_fallback(update, link, fallback, 0);
+        return;
+    }
+    PendingAi p;
+    p.job_id = created.job_id;
+    p.update = update;
+    p.created_at = t;
+    p.fallback = fallback;
+    p.message_id = tg_.send_message(update.chat_id, texts::kAiParsing, {});
+    applog::info("ai job created", {{"event", "tg_ai_job_created"}, {"tg_user_id", link.tg_user_id}, {"job_id", p.job_id}});
+    pending_ai_.push_back(std::move(p));
+}
+
+void Bot::ai_tick() {
+    if (ai_ == nullptr || pending_ai_.empty()) return;
+    std::vector<PendingAi> still;
+    for (auto& p : pending_ai_) {
+        applog::set_trace_id(applog::new_trace_id());
+        bool finished = true;
+        try {
+            finished = process_pending_ai(p);
+        } catch (const std::exception& e) {
+            // Как с апдейтом: одно упавшее задание не должно вечно крутиться.
+            applog::error("ai job processing failed",
+                          {{"event", "tg_ai_job_failed"}, {"job_id", p.job_id}, {"error", e.what()}});
+        }
+        applog::clear_request_context();
+        if (!finished) still.push_back(std::move(p));
+    }
+    pending_ai_ = std::move(still);
+}
+
+bool Bot::process_pending_ai(PendingAi& p) {
+    std::time_t t = now();
+    auto finish = [&](const char* outcome, const std::string& failure = {}) {
+        metrics::inc_counter("tg_ai_outcome_total", "Итог заданий wallet-ai у бота.", "outcome", outcome);
+        metrics::observe_duration("tg_ai_wait_seconds", "От «Разбираю…» до итога.", "outcome", outcome,
+                                  static_cast<double>(t - p.created_at));
+        applog::info("ai job finished", {{"event", "tg_ai_job_finished"},
+                                         {"tg_user_id", p.update.from_id},
+                                         {"job_id", p.job_id},
+                                         {"outcome", outcome},
+                                         {"failure", failure},
+                                         {"wait_secs", t - p.created_at}});
+        return true;
+    };
+
+    auto link = store_.find_link(p.update.from_id);
+    if (!link) {
+        tg_.edit_message(p.update.chat_id, p.message_id, texts::kNotLinked, {});
+        return finish("unlinked");
+    }
+    applog::set_user(link->user_id);
+    bool give_up = t - p.created_at >= kAiGiveUpSecs;
+
+    ai::JobResult job;
+    std::string token;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        sessions::Access access = sessions_.access_token(link->tg_user_id, /*force_refresh=*/attempt > 0);
+        if (access.status == sessions::Access::Status::Revoked) {
+            tg_.edit_message(p.update.chat_id, p.message_id, texts::kRevoked, {});
+            return finish("revoked");
+        }
+        if (access.status == sessions::Access::Status::Unavailable) {
+            if (!give_up) return false; // google-auth мигнул — следующий тик
+            run_fallback(p.update, *link, p.fallback, p.message_id);
+            return finish("gave_up");
+        }
+        token = access.token;
+        job = ai_->get_job(token, p.job_id);
+        if (job.status != ai::JobResult::Status::Unauthorized) break;
+    }
+
+    using S = ai::JobResult::Status;
+    switch (job.status) {
+    case S::Pending:
+    case S::Error:
+        if (!give_up) return false;
+        ai_->cancel_job(token, p.job_id);
+        run_fallback(p.update, *link, p.fallback, p.message_id);
+        return finish("gave_up", job.error);
+    case S::Done: {
+        std::string outcome = job.result.value("outcome", std::string{});
+        if (outcome == "draft" && job.result.contains("expense") && job.result["expense"].is_object()) {
+            const resolver::Accounts* acc = accounts(p.update, *link, /*fresh=*/false);
+            if (acc == nullptr) return finish("draft_no_accounts");
+            start_draft(p.update, *link, expense_from_json(job.result["expense"]), *acc, /*from_text=*/true,
+                        p.message_id);
+            return finish("draft");
+        }
+        run_fallback(p.update, *link, p.fallback, p.message_id);
+        return finish(outcome == "not_expense" ? "not_expense" : "rejected");
+    }
+    case S::Failed:
+        run_fallback(p.update, *link, p.fallback, p.message_id);
+        return finish("failed", job.failure);
+    case S::Cancelled:
+    case S::NotFound:
+    case S::Unauthorized:
+        run_fallback(p.update, *link, p.fallback, p.message_id);
+        return finish(job.status == S::NotFound ? "expired" : (job.status == S::Cancelled ? "cancelled" : "unauthorized"));
+    }
+    return true;
+}
+
+bool Bot::ai_enabled_for(const links::Link& link) {
+    std::time_t t = now();
+    if (ai_enabled_ && t - ai_enabled_checked_at_ < 60) return *ai_enabled_;
+    sessions::Access access = sessions_.access_token(link.tg_user_id);
+    if (access.status != sessions::Access::Status::Ok) return false;
+    ai_enabled_ = ai_->enabled(access.token).value_or(false);
+    ai_enabled_checked_at_ = t;
+    return *ai_enabled_;
 }
 
 void Bot::handle_callback(const telegram::Update& update) {
@@ -1035,7 +1290,9 @@ void run_poll_loop(telegram::TelegramApi& tg, links::LinkStore& store, Bot& bot,
     while (!stop.load()) {
         try {
             if (offset < 0) offset = store.load_offset();
-            auto updates = tg.get_updates(offset, poll_timeout_secs);
+            // Ждут итога задания wallet-ai — getUpdates недолгий, чтобы
+            // ai_tick правил «Разбираю…» без задержки на весь long poll.
+            auto updates = tg.get_updates(offset, bot.has_pending_ai() ? 1 : poll_timeout_secs);
             metrics::set_gauge("tg_last_poll_ok_timestamp_seconds",
                                "Unix-время последнего успешного getUpdates.",
                                static_cast<double>(std::time(nullptr)));
@@ -1061,6 +1318,7 @@ void run_poll_loop(telegram::TelegramApi& tg, links::LinkStore& store, Bot& bot,
                 offset = update.update_id + 1;
                 store.save_offset(offset);
             }
+            bot.ai_tick();
         } catch (const std::exception& e) {
             metrics::inc_counter("tg_poll_errors_total", "Ошибки цикла поллинга (getUpdates или своя база).",
                                  "stage", "poll");

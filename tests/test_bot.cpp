@@ -1183,3 +1183,237 @@ TEST(save_retries_once_on_wallet_api_401) {
     CHECK_EQ(h.wallet.calls[0].first.batch_id, h.wallet.calls[1].first.batch_id);
     CHECK(contains(h.tg.edits.back().text, "✓ Записано:"));
 }
+
+
+// --- Свободный текст через wallet-ai (шаг 4 org/docs/TODO_wallet_ai.md) ---
+
+namespace {
+
+class FakeAi final : public ai::AiApi {
+public:
+    struct Create {
+        std::string token;
+        json input;
+        std::string key;
+    };
+    ai::CreateResult create_parse_expense(const std::string& token, const json& input,
+                                          const std::string& key) override {
+        creates.push_back({token, input, key});
+        if (unauthorized_tokens.count(token) != 0) {
+            ai::CreateResult r;
+            r.status = ai::CreateResult::Status::Unauthorized;
+            return r;
+        }
+        return create_next;
+    }
+    ai::JobResult get_job(const std::string& token, const std::string& job_id) override {
+        gets.emplace_back(token, job_id);
+        return job_next;
+    }
+    void cancel_job(const std::string&, const std::string& job_id) override { cancels.push_back(job_id); }
+    std::optional<bool> enabled(const std::string&) override {
+        ++enabled_calls;
+        return enabled_value;
+    }
+
+    std::vector<Create> creates;
+    std::vector<std::pair<std::string, std::string>> gets;
+    std::vector<std::string> cancels;
+    ai::CreateResult create_next = created("job-1");
+    ai::JobResult job_next;
+    std::unordered_set<std::string> unauthorized_tokens;
+    std::optional<bool> enabled_value = true;
+    int enabled_calls = 0;
+
+    static ai::CreateResult created(const std::string& id) {
+        ai::CreateResult r;
+        r.status = ai::CreateResult::Status::Created;
+        r.job_id = id;
+        return r;
+    }
+};
+
+ai::JobResult job(ai::JobResult::Status status, json result = json::object(), const std::string& failure = "") {
+    ai::JobResult r;
+    r.status = status;
+    r.result = std::move(result);
+    r.failure = failure;
+    return r;
+}
+
+json draft_result(const std::string& amount, const std::string& category, const std::string& wallet = "") {
+    return {{"outcome", "draft"},
+            {"expense",
+             {{"amount", amount},
+              {"fraction_digits", 0},
+              {"currency_hint", ""},
+              {"category", category},
+              {"wallet", wallet},
+              {"datetime", "2026-09-21 17:13:20"},
+              {"comment", "с круассаном"}}},
+            {"prompt_version", "expense-v2"}};
+}
+
+struct AiHarness : Harness {
+    FakeAi ai;
+    AiHarness() {
+        link("w-1");
+        reports.routes = {{"/api/reports/accounts", accounts_json()}};
+        bot->enable_ai(&ai);
+    }
+};
+
+} // namespace
+
+TEST(ai_free_text_parsing_then_card_then_save) {
+    AiHarness h;
+    h.bot->handle(expense_message("кофе с круассаном 200", 30));
+
+    REQUIRE(h.ai.creates.size() == 1u);
+    const auto& c = h.ai.creates[0];
+    CHECK_EQ(c.input["text"].get<std::string>(), std::string("кофе с круассаном 200"));
+    CHECK_EQ(c.input["now"]["date"].get<std::string>(), std::string("2026-09-21")); // пояс пользователя — Москва
+    CHECK_EQ(c.input["now"]["time"].get<std::string>(), std::string("17:13:20"));
+    CHECK_EQ(c.input["default_wallet_uuid"].get<std::string>(), std::string("w-1"));
+    CHECK_EQ(c.key, "tg:" + std::to_string(kUser) + ":30"); // повтор апдейта — то же задание
+    CHECK_EQ(h.last_reply(), std::string(bot::texts::kAiParsing));
+    CHECK(h.bot->has_pending_ai());
+
+    // Ещё думает — ничего не правим.
+    h.ai.job_next = job(ai::JobResult::Status::Pending);
+    h.bot->ai_tick();
+    CHECK(h.tg.edits.empty());
+    CHECK(h.bot->has_pending_ai());
+
+    // Готово — «Разбираю…» (message_id 100) становится карточкой с пометкой.
+    h.ai.job_next = job(ai::JobResult::Status::Done, draft_result("200", "Кафе"));
+    h.bot->ai_tick();
+    CHECK(!h.bot->has_pending_ai());
+    REQUIRE(!h.tg.edits.empty());
+    CHECK_EQ(h.tg.edits.back().message_id, 100);
+    CHECK(contains(h.tg.edits.back().text,
+                   "Понял из текста — проверьте перед записью: 200,00\xC2\xA0₽ · Кафе · Тинькофф · сегодня"));
+    CHECK_EQ(buttons(h.tg.edits.back().keyboard),
+             std::string("✓ Записать=30:ok|Категория…=30:ce|Кошелёк…=30:we|✕ Не записывать=30:x"));
+    CHECK_EQ(h.tg.sent.size(), 1u); // нового сообщения нет — только «Разбираю…»
+
+    // Запись — тем же путём, что у строгого формата.
+    h.wallet.next = push_result(wallet::PushResult::Status::Ok);
+    h.bot->handle(press("30:ok"));
+    REQUIRE(h.wallet.calls.size() == 1u);
+    CHECK_EQ(h.wallet.calls[0].first.category_uuid, std::string("c-1"));
+    CHECK_EQ(h.wallet.calls[0].first.wallet_uuid, std::string("w-1"));
+    CHECK_EQ(h.wallet.calls[0].first.amount, std::string("200"));
+    CHECK(contains(h.tg.edits.back().text, "✓ Записано:"));
+}
+
+TEST(ai_not_called_for_strict_ok_no_digit_or_long_text) {
+    AiHarness h;
+    h.bot->handle(expense_message("350 продукты", 31));
+    CHECK(contains(h.last_reply(), "Понял так: 350,00"));
+    h.bot->handle(expense_message("привет", 32));
+    CHECK_EQ(h.last_reply(), std::string(bot::texts::kUnknown));
+    h.bot->handle(expense_message("кофе " + std::string(400, 'x') + " 200", 33));
+    CHECK_EQ(h.last_reply(), std::string(bot::texts::kUnknown));
+    // Ноль и будущая дата заданы явно и явно неверны — ИИ не поможет.
+    h.bot->handle(expense_message("0 кафе", 34));
+    h.bot->handle(expense_message("100 кафе 31.12.2099", 35));
+    CHECK(h.ai.creates.empty());
+}
+
+TEST(ai_disabled_behaves_as_before) {
+    Harness h;
+    h.link("w-1");
+    h.reports.routes = {{"/api/reports/accounts", accounts_json()}};
+    h.bot->handle(expense_message("кофе 200", 36));
+    CHECK_EQ(h.last_reply(), std::string(bot::texts::kUnknown));
+    CHECK(!h.bot->has_pending_ai());
+}
+
+TEST(ai_unavailable_falls_back_immediately) {
+    AiHarness h;
+    h.ai.create_next.status = ai::CreateResult::Status::Unavailable;
+    h.bot->handle(expense_message("кофе 200", 37));
+    CHECK_EQ(h.last_reply(), std::string(bot::texts::kAiNotUnderstood));
+    CHECK(!h.bot->has_pending_ai());
+
+    // Категория не нашлась + ИИ занят — прежние кнопки строгого разбора сразу.
+    h.ai.create_next.status = ai::CreateResult::Status::Busy;
+    h.bot->handle(expense_message("350 потратил на кофе", 38));
+    CHECK(contains(h.last_reply(), "Понял так: 350,00"));
+    CHECK(!h.tg.keyboards.back().empty());
+}
+
+TEST(ai_category_not_found_falls_back_to_strict_buttons_by_edit) {
+    AiHarness h;
+    h.bot->handle(expense_message("350 потратил на кофе", 39));
+    REQUIRE(h.ai.creates.size() == 1u);
+    CHECK_EQ(h.last_reply(), std::string(bot::texts::kAiParsing));
+
+    h.ai.job_next = job(ai::JobResult::Status::Failed, json::object(), "timeout");
+    h.bot->ai_tick();
+    REQUIRE(!h.tg.edits.empty());
+    CHECK_EQ(h.tg.edits.back().message_id, 100);
+    CHECK(contains(h.tg.edits.back().text, "Понял так: 350,00")); // строгий разбор, без пометки ИИ
+    CHECK(!h.tg.edits.back().keyboard.empty());                  // вопрос о категории кнопками
+}
+
+TEST(ai_rejected_not_expense_expired_bad_amount) {
+    AiHarness h;
+    h.bot->handle(expense_message("200 и 450 такси вчера кофе", 40)); // строгий: категория «и» не найдена
+    h.ai.job_next = job(ai::JobResult::Status::Done, {{"outcome", "rejected"}, {"reasons", {"amount_not_in_text"}}});
+    h.bot->ai_tick();
+    CHECK(contains(h.tg.edits.back().text, "Понял так: 200,00"));
+
+    h.ai.create_next = FakeAi::created("job-2");
+    h.bot->handle(expense_message("кофе 200", 41));
+    h.ai.job_next = job(ai::JobResult::Status::Done, {{"outcome", "not_expense"}});
+    h.bot->ai_tick();
+    CHECK_EQ(h.tg.edits.back().text, std::string(bot::texts::kAiNotUnderstood));
+
+    // Сумма не разобралась строгим форматом — ИИ; задание истекло — прежний текст ошибки.
+    h.ai.create_next = FakeAi::created("job-3");
+    h.bot->handle(expense_message("1,200.50 кафе", 42));
+    REQUIRE(h.ai.creates.size() == 3u);
+    h.ai.job_next = job(ai::JobResult::Status::NotFound);
+    h.bot->ai_tick();
+    CHECK(contains(h.tg.edits.back().text, "Не понял сумму"));
+    CHECK(!h.bot->has_pending_ai());
+}
+
+TEST(ai_gives_up_after_timeout_and_cancels) {
+    AiHarness h;
+    h.bot->handle(expense_message("кофе 200", 43));
+    h.ai.job_next = job(ai::JobResult::Status::Pending);
+    h.now += bot::kAiGiveUpSecs - 1;
+    h.bot->ai_tick();
+    CHECK(h.bot->has_pending_ai());
+    h.now += 1;
+    h.bot->ai_tick();
+    CHECK(!h.bot->has_pending_ai());
+    REQUIRE(h.ai.cancels.size() == 1u);
+    CHECK_EQ(h.ai.cancels[0], std::string("job-1"));
+    CHECK_EQ(h.tg.edits.back().text, std::string(bot::texts::kAiNotUnderstood));
+}
+
+TEST(ai_create_retries_once_on_401) {
+    AiHarness h;
+    h.ai.unauthorized_tokens = {"access-1"};
+    h.bot->handle(expense_message("кофе 200", 44));
+    REQUIRE(h.ai.creates.size() == 2u);
+    CHECK_EQ(h.ai.creates[1].token, std::string("access-2"));
+    CHECK_EQ(h.last_reply(), std::string(bot::texts::kAiParsing));
+}
+
+TEST(ai_help_line_only_when_enabled) {
+    AiHarness h;
+    h.bot->handle(private_message("/help"));
+    CHECK(contains(h.last_reply(), bot::texts::kHelpAi));
+    CHECK(contains(h.last_reply(), "/wallets")); // остальная справка на месте
+
+    h.ai.enabled_value = false;
+    h.now += 61; // кеш статуса — минута
+    h.bot->handle(private_message("/help"));
+    CHECK(!contains(h.last_reply(), bot::texts::kHelpAi));
+    CHECK_EQ(h.last_reply(), std::string(bot::texts::kHelp));
+}

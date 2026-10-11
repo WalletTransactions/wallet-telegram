@@ -19,6 +19,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "ai_client.hpp"
 #include "auth_client.hpp"
 #include "drafts.hpp"
 #include "link_repo.hpp"
@@ -69,6 +70,20 @@ public:
     // обработать», принимает цикл поллинга (run_poll_loop).
     void handle(const telegram::Update& update);
 
+    // Разбор свободного текста через wallet-ai (org/docs/TODO_wallet_ai.md,
+    // шаг 4). nullptr (по умолчанию) — ИИ выключен, бот ведёт себя как без
+    // него. Указатель живёт дольше бота.
+    void enable_ai(ai::AiApi* ai) { ai_ = ai; }
+
+    // Есть задания wallet-ai, чьего итога ждут сообщения «Разбираю…», —
+    // цикл поллинга тогда ждёт getUpdates недолго и чаще зовёт ai_tick.
+    bool has_pending_ai() const { return !pending_ai_.empty(); }
+
+    // Опрос заданий: готовые — правка «Разбираю…» в карточку или запасной
+    // ответ, зависшие дольше kAiGiveUpSecs — отмена и запасной ответ. Тот же
+    // поток, что handle(): HTTP-клиент Telegram, база и черновики однопоточны.
+    void ai_tick();
+
 private:
     void handle_start(const telegram::Update& update, const std::string& code);
     void handle_wallets(const telegram::Update& update, const links::Link& link);
@@ -78,6 +93,43 @@ private:
     void handle_tz(const telegram::Update& update, const links::Link& link, const std::string& args);
     void handle_unlink(const telegram::Update& update, const links::Link& link);
     void handle_expense(const telegram::Update& update, const links::Link& link);
+
+    // Что показать, если ИИ не помог (недоступен, не нашёл трату, ответ не
+    // прошёл проверки, не успел): ровно то, что бот ответил бы без ИИ.
+    struct AiFallback {
+        enum class Kind {
+            NotUnderstood, // текст не с суммы: «Не понял. Пример…»
+            ParseError,    // строгий разбор упал на сумме: прежний текст ошибки
+            StrictDraft,   // строгий разбор прошёл, категории нет: прежние кнопки
+        };
+        Kind kind = Kind::NotUnderstood;
+        parser::ParseError::Reason reason = parser::ParseError::Reason::NoAmount;
+        parser::ParsedExpense expense;
+    };
+    struct PendingAi {
+        std::string job_id;
+        telegram::Update update; // сообщение с тратой — id черновика, чат, отправитель
+        std::int64_t message_id = 0; // «Разбираю…» — его и правим
+        std::time_t created_at = 0;
+        AiFallback fallback;
+    };
+    // Создаёт задание parse_expense. Создано — «Разбираю…» и запись в
+    // pending_ai_; нет — сразу запасной ответ.
+    void try_ai(const telegram::Update& update, const links::Link& link, const AiFallback& fallback);
+    // true — с заданием покончено (итог показан), его можно забыть.
+    bool process_pending_ai(PendingAi& p);
+    // edit_message_id != 0 — править это сообщение, иначе отправить новое.
+    void run_fallback(const telegram::Update& update, const links::Link& link, const AiFallback& fallback,
+                      std::int64_t edit_message_id);
+    // Общий хвост строгого формата и ИИ: resolver -> черновик -> карточка.
+    // from_text — черновик из ИИ (пометка на карточке).
+    void start_draft(const telegram::Update& update, const links::Link& link, const parser::ParsedExpense& e,
+                     const resolver::Accounts& acc, bool from_text, std::int64_t edit_message_id);
+    // Текст без клавиатуры: правка edit_message_id или новое сообщение.
+    void respond(const telegram::Update& update, const std::string& text, std::int64_t edit_message_id);
+    // Включён ли ИИ (GET /api/ai/status токеном пользователя), кеш на минуту
+    // — для строки в /help. Не удалось узнать — false.
+    bool ai_enabled_for(const links::Link& link);
     // Нажатие кнопки черновика. Проверки те же, что у сообщения (allowlist,
     // личный чат, связка), плюс владелец черновика; ответ — ровно один.
     void handle_callback(const telegram::Update& update);
@@ -136,7 +188,19 @@ private:
     std::unordered_map<std::int64_t, CachedAccounts> accounts_cache_;
 
     drafts::Drafts drafts_;
+
+    ai::AiApi* ai_ = nullptr;
+    std::vector<PendingAi> pending_ai_;
+    std::optional<bool> ai_enabled_;
+    std::time_t ai_enabled_checked_at_ = 0;
 };
+
+// ИИ зовётся только для коротких сообщений с цифрой: без цифры трату не
+// записать, длинный текст — не трата и лишняя нагрузка на GPU.
+constexpr std::size_t kAiMaxTextBytes = 300;
+// Сколько ждать итога задания, прежде чем показать запасной ответ (дедлайн
+// генерации в wallet-ai — 60 с, плюс очередь).
+constexpr std::time_t kAiGiveUpSecs = 90;
 
 // Сколько живёт запись кеша справочника счетов.
 constexpr std::time_t kAccountsTtlSecs = 60;
@@ -156,6 +220,9 @@ extern const char* const kUnknown;
 extern const char* const kUnlinked;
 extern const char* const kNoWallets;
 extern const char* const kDraftStale;
+extern const char* const kAiParsing;
+extern const char* const kAiNotUnderstood;
+extern const char* const kHelpAi;
 } // namespace texts
 
 // Цикл long polling. Апдейты обрабатываются строго по порядку, в этом же

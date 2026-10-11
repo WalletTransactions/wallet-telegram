@@ -55,6 +55,7 @@ add_library(wallet_telegram_core STATIC
     src/card.cpp
     src/drafts.cpp
     src/telegram_client.cpp
+    src/ai_client.cpp
     src/auth_client.cpp
     src/link_repo.cpp
     ${WALLET_COMMON_DIR}/expense/strict.cpp

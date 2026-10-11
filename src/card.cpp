@@ -174,7 +174,9 @@ Message render(const Draft& d, const std::string& default_wallet_uuid, const std
         m.text = "✓ Записано: " + summary(d, today, yesterday);
         return m;
     }
-    m.text = "Понял так: " + summary(d, today, yesterday) + "\n\n";
+    // Из свободного текста модель могла понять не то — попросить проверить.
+    m.text = std::string(d.from_text ? "Понял из текста — проверьте перед записью: " : "Понял так: ") +
+             summary(d, today, yesterday) + "\n\n";
     switch (d.step) {
     case Draft::Step::Category:
         render_category(d, m);

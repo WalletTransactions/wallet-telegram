@@ -145,6 +145,14 @@ int main() {
     auto reports_api = reports::make_http_api(wallet_report_url, "tg_reports_errors_total");
     auto wallet_api = wallet::make_http_api(wallet_api_url);
     bot::Bot bot(*tg, *auth_api, *reports_api, *wallet_api, store, config);
+    // Свободный текст через wallet-ai (org/docs/TODO_wallet_ai.md, шаг 4).
+    // Пусто — ИИ выключен, бот работает как без него.
+    std::string wallet_ai_url = strip_trailing_slash(env_or("WALLET_AI_URL", ""));
+    std::unique_ptr<ai::AiApi> ai_api;
+    if (!wallet_ai_url.empty()) {
+        ai_api = ai::make_http_api(wallet_ai_url);
+        bot.enable_ai(ai_api.get());
+    }
 
     std::string host = env_or("HOST", "127.0.0.1");
     int port = std::stoi(env_or("PORT", "8086"));
@@ -172,7 +180,8 @@ int main() {
                   {"allowlist_size", config.allowed_user_ids.size()},
                   {"auth_service_url", auth_service_url},
                   {"wallet_report_url", wallet_report_url},
-                  {"wallet_api_url", wallet_api_url}});
+                  {"wallet_api_url", wallet_api_url},
+                  {"wallet_ai_url", wallet_ai_url}});
 
     bot::run_poll_loop(*tg, store, bot, g_stop, poll_timeout_secs);
 
