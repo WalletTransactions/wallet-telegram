@@ -28,13 +28,15 @@ COPY third_party/ third_party/
 FROM deps AS build
 # GIT_COMMIT — см. Containerfile wallet-report, тот же приём.
 ARG GIT_COMMIT=unknown
+ARG BUILD_JOBS=3
 RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DWALLET_TELEGRAM_BUILD_TESTS=OFF -DGIT_COMMIT="${GIT_COMMIT}" \
-    && cmake --build build --config Release -j"$(nproc)"
+    && cmake --build build --config Release -j"${BUILD_JOBS}"
 
 FROM deps AS test
 COPY tests/ tests/
+ARG BUILD_JOBS=3
 RUN cmake -B build-tests -DCMAKE_BUILD_TYPE=Debug \
-    && cmake --build build-tests --target wallet_telegram_tests -j"$(nproc)" \
+    && cmake --build build-tests --target wallet_telegram_tests -j"${BUILD_JOBS}" \
     && ./build-tests/tests/wallet_telegram_tests
 
 FROM debian:bookworm-slim AS runtime
