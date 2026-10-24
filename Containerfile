@@ -58,6 +58,10 @@ WORKDIR /app
 COPY --from=build /src/build/wallet_telegram /app/wallet_telegram
 COPY openapi.yaml /app/openapi.yaml
 COPY third_party/swagger-ui/ /app/vendor/swagger-ui/
+# Миграции своей базы. Накатывает их wallet-infra/infra/env/migrate.sh из
+# ЭТОГО образа (копирует /migrations), а не из рабочей папки: схема всегда
+# той же версии, что и код, который на неё выкатывается.
+COPY migrations/ /migrations/
 
 USER appuser
 EXPOSE 8086
