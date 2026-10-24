@@ -160,3 +160,12 @@ wallet-api), с фейковым Telegram: `bash wallet-telegram/tests_integrati
 `tg_link_rejected`, `tg_update_failed`, ...). Тексты сообщений, суммы, коды
 связывания и токены в логи не пишутся. Токен бота входит в URL запросов к Bot
 API, поэтому URL запросов к Telegram не логируются.
+
+## Версия
+
+`GET /version`, строка лога при старте и `build_info` в `GET /metrics` —
+общая схема C++-сервисов проекта, см. [README google-auth, «Версия»](https://github.com/WalletTransactions/google-auth#версия).
+
+Релиз — git-тегами: `vX.Y.Z-rc.N` публикует образ в ghcr и выкатывает его
+в test, `vX.Y.Z` на том же коммите — тот же образ в prod; `X.Y.Z` должен
+совпадать с `VERSION`. Подробно — [README google-auth, «Версия»](https://github.com/WalletTransactions/google-auth#версия), «Релиз».
