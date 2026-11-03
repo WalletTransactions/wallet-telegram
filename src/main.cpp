@@ -105,7 +105,8 @@ int main() {
     std::string log_dir = env_or("LOG_DIR", default_log_dir());
     if (log_dir == "stdout" || log_dir == "-") log_dir.clear();
     applog::init(log_dir, "wallet-telegram");
-    metrics::set_build_info(version::kService, version::kVersion, version::kGitCommit);
+    metrics::set_build_info(version::kService, version::kVersion, version::kBuild,
+                            version::kGitCommit);
 
     std::string bot_token = env_required("TELEGRAM_BOT_TOKEN", "токен бота от @BotFather");
     std::string service_secret = env_required(
@@ -173,7 +174,7 @@ int main() {
     std::signal(SIGTERM, handle_signal);
     std::signal(SIGINT, handle_signal);
 
-    applog::info("wallet-telegram v" + std::string(version::kVersion) + " (" + std::string(version::kGitCommit) +
+    applog::info("wallet-telegram v" + std::string(version::kBuild) + " (" + std::string(version::kGitCommit) +
                      ") polling Telegram, служебные ручки на http://" + host + ":" + std::to_string(port),
                  {{"event", "started"},
                   {"bot_username", config.bot_username},
