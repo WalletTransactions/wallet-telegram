@@ -16,7 +16,11 @@ wallet-gateway он не публикуется. Адрес по умолчан�
 
 #### Scenario: Версия билда
 - **WHEN** вызывается `GET /version`
-- **THEN** ответ — JSON с `service: wallet-telegram`, `version` (содержимое файла `VERSION`, без суффикса `-rc.N`) и `git_commit` (коммит сборки из `GIT_COMMIT`, `unknown`, если не задан)
+- **THEN** ответ — JSON с `service: wallet-telegram`, `version` (содержимое файла `VERSION`, без суффикса `-rc.N`), `build` (тег образа из `APP_BUILD`, например `0.1.0-rc.2`; без него `<VERSION>-dev`), `git_commit` (коммит сборки из `GIT_COMMIT`, `unknown`, если не задан) и `started_at` (время запуска процесса, ISO-8601 UTC)
+
+#### Scenario: Время запуска в метриках
+- **WHEN** вызывается `GET /metrics`
+- **THEN** в ответе есть `build_info` с меткой `build` и `process_start_time_seconds`, совпадающий с `started_at` из `/version` с точностью до секунды
 
 ### Requirement: Liveness не зависит от зависимостей
 `GET /healthz` SHALL отвечать 200 `{"status":"ok"}`, пока жив процесс, не
