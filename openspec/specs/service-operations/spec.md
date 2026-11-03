@@ -1,12 +1,11 @@
-# Spec Delta
+# service-operations Specification
 
 ## Purpose
-
 Эксплуатационный контракт сервиса: служебные HTTP-ручки, метрики и логи,
 конфигурация запуска и ограничения развёртывания, на которые опираются
-compose, k8s и мониторинг.
+compose-контуры prod/test (wallet-infra), выкатка и мониторинг.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Только служебные HTTP-ручки
 Сервис SHALL отдавать по HTTP только служебные ручки без авторизации:
@@ -17,7 +16,11 @@ wallet-gateway он не публикуется. Адрес по умолчан�
 
 #### Scenario: Версия билда
 - **WHEN** вызывается `GET /version`
-- **THEN** ответ — JSON с `service: wallet-telegram`, `version` и `git_commit`
+- **THEN** ответ — JSON с `service: wallet-telegram`, `version` (содержимое файла `VERSION`, без суффикса `-rc.N`), `build` (тег образа из `APP_BUILD`, например `0.1.0-rc.2`; без него `<VERSION>-dev`), `git_commit` (коммит сборки из `GIT_COMMIT`, `unknown`, если не задан) и `started_at` (время запуска процесса, ISO-8601 UTC)
+
+#### Scenario: Время запуска в метриках
+- **WHEN** вызывается `GET /metrics`
+- **THEN** в ответе есть `build_info` с меткой `build` и `process_start_time_seconds`, совпадающий с `started_at` из `/version` с точностью до секунды
 
 ### Requirement: Liveness не зависит от зависимостей
 `GET /healthz` SHALL отвечать 200 `{"status":"ok"}`, пока жив процесс, не
@@ -52,7 +55,8 @@ wallet-gateway он не публикуется. Адрес по умолчан�
 ### Requirement: Обязательная конфигурация
 Сервис SHALL отказываться стартовать (код 1, ошибка в логе), если не задан
 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_SERVICE_SECRET`, `AUTH_SERVICE_URL`,
-`WALLET_REPORT_URL`, `WALLET_API_URL` или `DATABASE_URL`, если база
+`WALLET_REPORT_URL`, `WALLET_API_URL` или `DATABASE_URL`, если в
+`TELEGRAM_ALLOWED_USER_IDS` есть нечисловой элемент, если база
 недоступна или её схема не прошла проверку, а также если служебный порт занят.
 
 #### Scenario: Не задан секрет
@@ -61,14 +65,23 @@ wallet-gateway он не публикуется. Адрес по умолчан�
 
 ### Requirement: Необязательная конфигурация
 Сервис SHALL принимать необязательные параметры: `TELEGRAM_BOT_USERNAME`,
-`TELEGRAM_DEFAULT_TZ` (по умолчанию `UTC`), `TELEGRAM_ALLOWED_USER_IDS`,
-`TELEGRAM_POLL_TIMEOUT_SECS` (25), `TELEGRAM_API_URL`
-(`https://api.telegram.org`), `WALLET_AI_URL` (пусто — ИИ выключен), `LOG_DIR`.
-Значения читаются из окружения и файла `.env` рядом с процессом.
+`TELEGRAM_DEFAULT_TZ` (по умолчанию `UTC`), `TELEGRAM_ALLOWED_USER_IDS` (пусто —
+без ограничений), `TELEGRAM_POLL_TIMEOUT_SECS` (25), `TELEGRAM_API_URL`
+(`https://api.telegram.org`), `WALLET_AI_URL` (пусто — ИИ выключен), `HOST`
+(`127.0.0.1`), `PORT` (`8086`), `LOG_SQL_PARAMS` (`false`), `LOG_DIR` (пусто,
+`stdout` или `-` — логи в stdout).
 
 #### Scenario: Локальный Bot API server
 - **WHEN** задан `TELEGRAM_API_URL=http://localhost:8081`
 - **THEN** все вызовы Bot API идут на этот адрес
+
+### Requirement: Источник конфигурации
+Сервис SHALL читать параметры из окружения и файла `.env` в текущем каталоге;
+значение из окружения имеет приоритет над `.env`.
+
+#### Scenario: Параметр задан дважды
+- **WHEN** `TELEGRAM_DEFAULT_TZ` задан и в окружении, и в `.env`
+- **THEN** действует значение из окружения
 
 ### Requirement: Соседи — напрямую по внутренней сети
 Сервис SHALL обращаться к google-auth, wallet-report, wallet-api и wallet-ai
@@ -81,18 +94,21 @@ wallet-gateway он не публикуется. Адрес по умолчан�
 - **THEN** запрос прерывается по таймауту чтения, и пользователь получает «Сервис временно недоступен…»
 
 ### Requirement: Один экземпляр
-Сервис SHALL работать в одном экземпляре на токен бота (`replicas: 1`,
-стратегия Recreate): Telegram не допускает параллельных `getUpdates` одного
+Сервис SHALL работать в одном экземпляре на токен бота (один контейнер
+`wallet-telegram` на контур prod/test, у каждого контура свой бот; выкатка
+`docker compose up -d` пересоздаёт контейнер): Telegram не допускает параллельных `getUpdates` одного
 бота, а черновики, кеши и ожидающие задания ИИ живут в памяти процесса.
 
 #### Scenario: Выкатка новой версии
 - **WHEN** выкатывается новая версия
-- **THEN** старый под останавливается до запуска нового, черновики старого процесса теряются, и их кнопки отвечают «устарел»
+- **THEN** старый контейнер останавливается (SIGTERM, `stop_grace_period` 35 с) до запуска нового, черновики старого процесса теряются, и их кнопки отвечают «устарел»
 
 ### Requirement: Собственная база
 Сервис SHALL хранить состояние в своей базе `wallet_telegram`, схема которой
 задаётся миграциями этого репозитория. Роль сервиса имеет только DML; DDL
-выполняет мигратор. Данных леджера в этой базе нет.
+выполняет мигратор. Миграции поставляются в образе сервиса (`/migrations`), и
+при выкатке `wallet-infra/infra/env/migrate.sh` накатывает их до замены
+контейнера; если миграция упала, сервис остаётся на прежнем образе. Данных леджера в этой базе нет.
 
 #### Scenario: Миграции не накачены
 - **WHEN** сервис стартует на базе, где нет таблиц `tg_link` или `tg_update_offset`
