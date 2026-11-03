@@ -4,6 +4,9 @@
 
 #include "test_framework.hpp"
 
+#include <ctime>
+#include <string>
+
 namespace {
 
 bool has(const std::string& text, const std::string& line) { return text.find(line) != std::string::npos; }
@@ -28,4 +31,29 @@ TEST(metrics_observe_duration_renders_cumulative_buckets) {
     // Больше последнего бакета — только в +Inf.
     CHECK(has(out, "test_duration_seconds_bucket{method=\"editMessageText\",le=\"10\"} 0\n"));
     CHECK(has(out, "test_duration_seconds_bucket{method=\"editMessageText\",le=\"+Inf\"} 1\n"));
+}
+
+// build_info с меткой build и время запуска: started_at_iso() (GET /version)
+// и process_start_time_seconds (/metrics) — одна и та же секунда.
+TEST(metrics_build_info_and_start_time) {
+    std::time_t before = std::time(nullptr);
+    metrics::set_build_info("wallet-telegram", "0.1.0", "0.1.0-rc.2", "a1b2c3d4");
+    std::time_t after = std::time(nullptr);
+    std::string out = metrics::render();
+
+    CHECK(has(out, "build_info{service=\"wallet-telegram\",version=\"0.1.0\",build=\"0.1.0-rc.2\","
+                   "git_commit=\"a1b2c3d4\"} 1\n"));
+    CHECK(has(out, "# TYPE process_start_time_seconds gauge\n"));
+
+    std::size_t pos = out.find("\nprocess_start_time_seconds ");
+    CHECK(pos != std::string::npos);
+    if (pos == std::string::npos) return;
+    std::time_t started = static_cast<std::time_t>(std::stoll(out.substr(pos + 28)));
+    CHECK(started >= before && started <= after);
+
+    std::tm tm{};
+    gmtime_r(&started, &tm);
+    char want[32];
+    std::strftime(want, sizeof want, "%Y-%m-%dT%H:%M:%SZ", &tm);
+    CHECK(metrics::started_at_iso() == want);
 }

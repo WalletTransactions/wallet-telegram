@@ -165,6 +165,10 @@ API, поэтому URL запросов к Telegram не логируются.
 
 `GET /version`, строка лога при старте и `build_info` в `GET /metrics` —
 общая схема C++-сервисов проекта, см. [README google-auth, «Версия»](https://github.com/WalletTransactions/google-auth#версия).
+Там же — `build` (тег образа из `--build-arg APP_BUILD`) и `started_at`
+(время запуска) в `GET /version`. Гейтвей опрашивает `/version` бота для
+сводки `GET /api/versions`, если ему задан `WALLET_TELEGRAM_URL`; сам бот
+через гейтвей по-прежнему не публикуется.
 
 Релиз — git-тегами: `vX.Y.Z-rc.N` публикует образ в ghcr и выкатывает его
 в test, `vX.Y.Z` на том же коммите — тот же образ в prod; `X.Y.Z` должен
