@@ -48,6 +48,11 @@ Command parse_command(const std::string& text, const std::string& bot_username);
 // внутренний эндпоинт.
 bool looks_like_link_code(const std::string& s);
 
+// Меню команд для setMyCommands — те же команды, что в /help; /ai и /new —
+// только с ИИ (WALLET_AI_URL задан). /start в меню нет: без кода из
+// веб-кабинета он только объясняет, где этот код взять.
+std::vector<telegram::BotCommand> menu_commands(bool ai_enabled);
+
 struct Config {
     std::string bot_username;
     std::string default_tz = "UTC";

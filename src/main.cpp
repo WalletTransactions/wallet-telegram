@@ -157,6 +157,14 @@ int main() {
         ai_api = ai::make_http_api(wallet_ai_url);
         bot.enable_ai(ai_api.get());
     }
+    // Меню команд по «/» (add-command-menu). Telegram недоступен на старте —
+    // не повод не стартовать: меню останется прежним, бот работает.
+    try {
+        tg->set_my_commands(bot::menu_commands(ai_api != nullptr));
+        applog::info("telegram command menu set", {{"event", "tg_commands_set"}, {"ai", ai_api != nullptr}});
+    } catch (const std::exception& ex) {
+        applog::warn(std::string("setMyCommands: ") + ex.what(), {{"event", "tg_commands_set_failed"}});
+    }
 
     std::string host = env_or("HOST", "127.0.0.1");
     int port = std::stoi(env_or("PORT", "8086"));

@@ -57,6 +57,13 @@ struct Update {
 
 // Ошибка вызова Bot API: сеть, HTTP не 200 или {"ok": false}. description —
 // текст от Telegram либо описание сетевой ошибки; токена в нём нет.
+// Команда в меню бота: command — без «/», [a-z0-9_]{1,32}; description —
+// 1..256 символов (лимиты Bot API).
+struct BotCommand {
+    std::string command;
+    std::string description;
+};
+
 struct ApiError : std::runtime_error {
     std::string method;
     int http_status; // 0 — до HTTP-ответа не дошло (сеть, таймаут)
@@ -95,6 +102,11 @@ public:
     // ~15 с крутятся часы. Пустой text — просто погасить их; alert — окно с
     // кнопкой «OK» вместо всплывающей подсказки.
     virtual void answer_callback(const std::string& callback_id, const std::string& text, bool alert) = 0;
+
+    // Меню команд, которое клиент Telegram показывает по «/» и кнопкой
+    // «Меню» (setMyCommands, scope по умолчанию — все личные чаты).
+    // Заменяет прежний список целиком.
+    virtual void set_my_commands(const std::vector<BotCommand>& commands) = 0;
 };
 
 // reply_markup для sendMessage/editMessageText — чистая функция ради

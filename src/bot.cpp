@@ -379,6 +379,23 @@ Command parse_command(const std::string& text, const std::string& bot_username) 
     return cmd;
 }
 
+std::vector<telegram::BotCommand> menu_commands(bool ai_enabled) {
+    std::vector<telegram::BotCommand> out = {
+        {"wallets", "Кошельки и балансы"},
+        {"last", "Последние операции"},
+        {"categories", "Категории"},
+    };
+    if (ai_enabled) {
+        out.push_back({"ai", "Кто отвечает на вопросы"});
+        out.push_back({"new", "Новый разговор с ИИ"});
+    }
+    out.push_back({"default", "Кошелёк по умолчанию для трат"});
+    out.push_back({"tz", "Часовой пояс"});
+    out.push_back({"help", "Что умеет бот"});
+    out.push_back({"unlink", "Отключить бота от кошелька"});
+    return out;
+}
+
 bool looks_like_link_code(const std::string& s) {
     if (s.size() < 16 || s.size() > 64) return false;
     return std::all_of(s.begin(), s.end(), [](unsigned char c) {
