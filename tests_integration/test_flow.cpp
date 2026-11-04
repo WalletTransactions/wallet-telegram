@@ -59,6 +59,7 @@ public:
         edits.push_back(text);
     }
     void answer_callback(const std::string&, const std::string& text, bool) override { answers.push_back(text); }
+    void set_my_commands(const std::vector<telegram::BotCommand>&) override {}
 
     std::vector<std::string> sent;
     std::vector<telegram::Keyboard> keyboards;

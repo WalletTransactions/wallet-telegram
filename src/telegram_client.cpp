@@ -89,6 +89,12 @@ public:
         call("answerCallbackQuery", payload);
     }
 
+    void set_my_commands(const std::vector<BotCommand>& commands) override {
+        json list = json::array();
+        for (const auto& c : commands) list.push_back({{"command", c.command}, {"description", c.description}});
+        call("setMyCommands", {{"commands", list}});
+    }
+
 private:
     json call(const std::string& method, const json& payload) {
         auto started = std::chrono::steady_clock::now();

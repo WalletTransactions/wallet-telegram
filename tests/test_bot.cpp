@@ -36,6 +36,8 @@ public:
     void answer_callback(const std::string& callback_id, const std::string& text, bool alert) override {
         answers.push_back({callback_id, text, alert});
     }
+    void set_my_commands(const std::vector<telegram::BotCommand>& c) override { commands = c; }
+    std::vector<telegram::BotCommand> commands;
 
     struct Edit {
         std::int64_t chat_id;
@@ -413,6 +415,7 @@ public:
     }
     void edit_message(std::int64_t, std::int64_t, const std::string&, const telegram::Keyboard&) override {}
     void answer_callback(const std::string&, const std::string&, bool) override {}
+    void set_my_commands(const std::vector<telegram::BotCommand>&) override {}
 
     std::vector<std::vector<telegram::Update>> batches;
     std::vector<std::int64_t> offsets_seen;
@@ -1855,4 +1858,24 @@ TEST(ai_callback_untrusted_and_link_checked) {
     plain.bot->handle(press("ai:sel:lmstudio"));
     REQUIRE(plain.tg.answers.size() == 1u);
     CHECK_EQ(plain.tg.answers[0].text, std::string(""));
+}
+
+TEST(menu_commands_match_help_and_api_limits) {
+    auto names = [](const std::vector<telegram::BotCommand>& cmds) {
+        std::string out;
+        for (const auto& c : cmds) out += (out.empty() ? "" : ",") + c.command;
+        return out;
+    };
+    CHECK_EQ(names(bot::menu_commands(false)), std::string("wallets,last,categories,default,tz,help,unlink"));
+    CHECK_EQ(names(bot::menu_commands(true)), std::string("wallets,last,categories,ai,new,default,tz,help,unlink"));
+
+    // Каждая команда меню есть в /help (с ИИ — в строках команд ИИ) и
+    // проходит лимиты Bot API: [a-z0-9_]{1,32}, описание 1..256.
+    std::string help = std::string(bot::texts::kHelp) + bot::texts::kHelpAiCommands;
+    for (const auto& c : bot::menu_commands(true)) {
+        CHECK(contains(help, "/" + c.command + " "));
+        CHECK(!c.command.empty() && c.command.size() <= 32);
+        for (char ch : c.command) CHECK((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_');
+        CHECK(!c.description.empty() && c.description.size() <= 256);
+    }
 }
