@@ -15,6 +15,8 @@
 
 - [x] 3.1 `ChatState` по D5: `conversation_id`, сброс через 1800 с, `/new` с ответом «Начали новый разговор.», окно уточнения 600 с после ответа с «?». Проверка: тесты с фейковыми часами — два вопроса за 5 минут с одним id; после `/new` id новый; «сентябрь» через минуту после «За какой месяц?» уходит в `chat`, через 15 минут — по обычной маршрутизации — `tests/test_bot.cpp`: `chat_dialog_conversation_and_clarification`, `chat_conversation_ids_survive_restart`; номер разговора = max(прежний + 1, текущее время в секундах)
 
+- [x] 3.2 Окно уточнения после любого ответа чата; текст без цифр в окне — в chat; `not_expense` при неразобранной сумме — тоже в chat (D2, D3, D5 — по живой переписке на test 2026-11-04: ответы модели без «?», «сентябрь» → «Пока не понимаю…», «2026-10-01 по 2026-10-31» → «Не понял сумму»). Проверка: `tests/test_bot.cpp`: `chat_reply_window_after_imperative_answer` (та же переписка), `chat_dialog_conversation_and_clarification`
+
 ## 4. /ai и согласие
 
 - [x] 4.1 `AiApi::get_settings`/`put_settings` с разбором ответов. Проверка: юнит-тесты разбора 200, 400 `provider_unavailable`, 409 `consent_required`, 503 — `tests/test_ai_client.cpp`: `ai_settings_response` (200, 400 `provider_unavailable`, 409 `consent_required`, 401, 503, битый 200). Вместо `optional<json>`/`{status, json}` из D7 — общий `SettingsResult` для GET и PUT (повтор на 401 тот же)
