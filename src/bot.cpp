@@ -509,16 +509,18 @@ void Bot::handle(const telegram::Update& update) {
         return;
     }
 
-    // Вопрос к ИИ (D2): сначала ответ на уточнение — «сентябрь» после «За
-    // какой месяц?» не похож ни на вопрос, ни на трату, — потом признаки
-    // вопроса. Без связки — общий ответ ниже («подключите»), wallet-ai не зовётся.
-    if (cmd.name.empty() && ai_ != nullptr &&
-        (awaiting_reply(update.from_id, now()) || chat_routing::looks_like_question(update.text))) {
+    // Вопрос к ИИ (D2): ответ на уточнение — «сентябрь» после «Укажите
+    // период.» не похож ни на вопрос, ни на трату, — или признаки вопроса.
+    // Текст с цифрой в окне уточнения идёт в разбор траты («кофе 200» после
+    // вопроса к ИИ — всё ещё трата), а not_expense оттуда — в чат (D3).
+    // Без связки — общий ответ ниже («подключите»), wallet-ai не зовётся.
+    bool reply_to_chat = awaiting_reply(update.from_id, now()) && !ai_eligible(update.text);
+    if (cmd.name.empty() && ai_ != nullptr && (reply_to_chat || chat_routing::looks_like_question(update.text))) {
         auto link = store_.find_link(update.from_id);
         if (link) {
             count_update("question");
             applog::set_user(link->user_id);
-            start_chat(update, *link, /*edit_message_id=*/0, /*after_not_expense=*/false);
+            start_chat(update, *link, /*edit_message_id=*/0, /*fallback=*/nullptr);
             return;
         }
     }
@@ -1073,10 +1075,14 @@ bool Bot::process_pending_ai(PendingAi& p) {
                         p.message_id);
             return finish("draft");
         }
-        // Текст не с суммы и не трата — вероятно, вопрос без признаков
-        // («траты на такси за 2 недели»): в чат тем же сообщением (D3).
-        if (outcome == "not_expense" && p.fallback.kind == AiFallback::Kind::NotUnderstood) {
-            start_chat(p.update, *link, p.message_id, /*after_not_expense=*/true);
+        // Не трата — вероятно, вопрос без признаков («траты на такси за 2
+        // недели») или ответ на уточнение с цифрами («2026-10-01 по
+        // 2026-10-31», строгий разбор упал на сумме): в чат тем же
+        // сообщением (D3). Ненайденная категория («350 потратил на кофе») —
+        // трата, там прежние кнопки.
+        if (outcome == "not_expense" && (p.fallback.kind == AiFallback::Kind::NotUnderstood ||
+                                         p.fallback.kind == AiFallback::Kind::ParseError)) {
+            start_chat(p.update, *link, p.message_id, &p.fallback);
             return finish("not_expense_chat");
         }
         run_fallback(p.update, *link, p.fallback, p.message_id);
@@ -1095,7 +1101,8 @@ bool Bot::process_pending_ai(PendingAi& p) {
 }
 
 void Bot::start_chat(const telegram::Update& update, const links::Link& link, std::int64_t edit_message_id,
-                     bool after_not_expense) {
+                     const AiFallback* fallback) {
+    bool after_not_expense = fallback != nullptr;
     std::time_t t = now();
     json input = {{"text", update.text},
                   {"conversation_id", conversation_for(link.tg_user_id, t)},
@@ -1120,7 +1127,7 @@ void Bot::start_chat(const telegram::Update& update, const links::Link& link, st
                                               {"error", created.error}});
         if (after_not_expense) {
             // Чата нет — ответ, как будто ИИ не помог с тратой.
-            respond(update, texts::kAiNotUnderstood, edit_message_id);
+            run_fallback(update, link, *fallback, edit_message_id);
             return;
         }
         using S = ai::CreateResult::Status;
@@ -1213,7 +1220,10 @@ bool Bot::process_pending_chat(PendingAi& p, const links::Link& link, std::time_
         constexpr std::size_t kEllipsisBytes = 3;
         show(text::truncate_utf8(answer, kMaxMessageBytes - signature.size() - kEllipsisBytes) + signature);
         // Модель переспросила — следующий текст пользователя идёт в тот же диалог.
-        if (answer.back() == '?') chats_[link.tg_user_id].awaiting_reply_until = t + kChatReplyWindowSecs;
+        // Следующий текст пользователя — вероятно, ответ модели в этом же
+        // диалоге. Не только после «?»: модель переспрашивает и
+        // повелительно («Укажите, пожалуйста, даты.»).
+        chats_[link.tg_user_id].awaiting_reply_until = t + kChatReplyWindowSecs;
         return finish("answer", {}, provider);
     }
     case S::Failed:

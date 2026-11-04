@@ -135,16 +135,16 @@ private:
     // Вопрос к ИИ (спека ai-chat): задание chat в диалоге пользователя,
     // «Думаю…» и запись в pending_ai_. edit_message_id != 0 — править это
     // сообщение («Разбираю…» после not_expense, D3), а не слать новое.
-    // after_not_expense — ключ идемпотентности с суффиксом :chat и запасной
-    // ответ «Не понял…», если задание не создано.
+    // fallback != nullptr — после not_expense: ключ идемпотентности с
+    // суффиксом :chat и этот запасной ответ, если задание не создано.
     void start_chat(const telegram::Update& update, const links::Link& link, std::int64_t edit_message_id,
-                    bool after_not_expense);
+                    const AiFallback* fallback);
     // Диалог пользователя в памяти бота (D5). История — в wallet-ai, здесь
     // только номер разговора и окно ответа на уточнение.
     struct ChatState {
         std::int64_t seq = 0;              // conversation_id = tg-<tg_user_id>-<seq>; 0 — ещё не начат
         std::time_t last_question_at = 0;  // сброс разговора через kChatIdleSecs без вопросов
-        std::time_t awaiting_reply_until = 0; // ответ модели кончился «?» — следующий текст в чат
+        std::time_t awaiting_reply_until = 0; // после ответа модели — следующий текст без цифр в чат
     };
     std::string conversation_for(std::int64_t tg_user_id, std::time_t t);
     void new_conversation(std::int64_t tg_user_id, std::time_t t);

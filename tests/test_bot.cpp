@@ -1647,40 +1647,47 @@ TEST(chat_dialog_conversation_and_clarification) {
     CHECK_EQ(conv_of(h.ai, 1), first);
     answer("2899.00 EUR.");
 
-    // Ответ без «?» — окно уточнения закрыто: «сентябрь» — непонятое.
-    h.bot->handle(expense_message("сентябрь", 102));
-    CHECK_EQ(h.last_reply(), std::string(bot::texts::kUnknown));
-    CHECK_EQ(h.ai.chat_creates.size(), 2u);
-
-    // Второй вопрос через 5 минут — тот же диалог.
-    h.now += 300;
-    h.bot->handle(expense_message("а за август?", 103));
+    // Окно открывается после любого ответа модели, не только с «?».
+    h.bot->handle(expense_message("а без такси", 102));
+    REQUIRE(h.ai.chat_creates.size() == 3u);
     CHECK_EQ(conv_of(h.ai, 2), first);
+    answer("1500.00 EUR.");
+
+    // Через 11 минут окно закрыто: «сентябрь» — непонятое.
+    h.now += 11 * 60;
+    h.bot->handle(expense_message("сентябрь", 103));
+    CHECK_EQ(h.last_reply(), std::string(bot::texts::kUnknown));
+    CHECK_EQ(h.ai.chat_creates.size(), 3u);
+
+    // Вопрос через 12 минут после прошлого — тот же диалог (меньше 30 минут).
+    h.bot->handle(expense_message("а за август?", 104));
+    REQUIRE(h.ai.chat_creates.size() == 4u);
+    CHECK_EQ(conv_of(h.ai, 3), first);
     answer("За какой год?");
 
     // Строгая трата в окне уточнения идёт прежним путём.
-    h.bot->handle(expense_message("200 кафе", 104));
+    h.bot->handle(expense_message("200 кафе", 105));
     CHECK(contains(h.last_reply(), "Понял так: 200,00"));
-    CHECK_EQ(h.ai.chat_creates.size(), 3u);
+    CHECK_EQ(h.ai.chat_creates.size(), 4u);
 
     // Уточнение устарело (15 минут) — обычная маршрутизация.
     h.now += 15 * 60;
-    h.bot->handle(expense_message("в 2026", 105)); // текст с цифрой — разбор траты, не чат
-    CHECK_EQ(h.ai.chat_creates.size(), 3u);
+    h.bot->handle(expense_message("в 2026", 106)); // текст с цифрой — разбор траты, не чат
+    CHECK_EQ(h.ai.chat_creates.size(), 4u);
     CHECK_EQ(h.ai.creates.size(), 1u);
 
     // /new — новый разговор.
     h.bot->handle(private_message("/new"));
     CHECK_EQ(h.last_reply(), std::string(bot::texts::kChatNew));
-    h.bot->handle(expense_message("сколько за няню?", 106));
-    std::string second = conv_of(h.ai, 3);
+    h.bot->handle(expense_message("сколько за няню?", 107));
+    std::string second = conv_of(h.ai, 4);
     CHECK(second != first);
 
     // 30 минут без вопросов — тоже новый.
     h.now += bot::kChatIdleSecs;
-    h.bot->handle(expense_message("сколько за няню?", 107));
-    CHECK(conv_of(h.ai, 4) != second);
-    CHECK(conv_of(h.ai, 4) != first);
+    h.bot->handle(expense_message("сколько за няню?", 108));
+    CHECK(conv_of(h.ai, 5) != second);
+    CHECK(conv_of(h.ai, 5) != first);
 
     // /new без связки — предложение подключиться.
     h.store.delete_link(kUser);
@@ -1878,4 +1885,58 @@ TEST(menu_commands_match_help_and_api_limits) {
         for (char ch : c.command) CHECK((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_');
         CHECK(!c.description.empty() && c.description.size() <= 256);
     }
+}
+
+// Переписка с test 2026-11-04: модель переспрашивает без «?», ответ — то
+// словами, то датами.
+TEST(chat_reply_window_after_imperative_answer) {
+    AiHarness h;
+    auto answer = [&](const std::string& text) {
+        h.ai.job_next = job(ai::JobResult::Status::Done, chat_answer(text));
+        h.bot->ai_tick();
+    };
+    h.bot->handle(expense_message("сколько за няню?", 120));
+    answer("Я могу посчитать расход за категорию \"Baby Sitter\" только если вы укажете период. Укажите, "
+           "пожалуйста, даты.");
+    std::string conv = conv_of(h.ai, 0);
+
+    // «сентябрь. да» — без цифр: в тот же диалог, а не «Пока не понимаю».
+    h.now += 30;
+    h.bot->handle(expense_message("сентябрь. да", 121));
+    REQUIRE(h.ai.chat_creates.size() == 2u);
+    CHECK_EQ(conv_of(h.ai, 1), conv);
+    answer("Укажите конечную дату, например с 2026-10-01 по 2026-10-31.");
+
+    // Даты начинаются с цифры: строгий разбор падает на сумме, parse_expense
+    // говорит not_expense — текст уходит в тот же диалог, «Разбираю…» → «Думаю…».
+    h.now += 30;
+    h.bot->handle(expense_message("2026-10-01 по 2026-10-31", 122));
+    REQUIRE(h.ai.creates.size() == 1u);
+    CHECK_EQ(h.last_reply(), std::string(bot::texts::kAiParsing));
+    std::int64_t parsing_id = h.tg.next_message_id - 1;
+    h.ai.job_next = job(ai::JobResult::Status::Done, {{"outcome", "not_expense"}});
+    h.bot->ai_tick();
+    REQUIRE(h.ai.chat_creates.size() == 3u);
+    CHECK_EQ(h.ai.chat_creates[2].input["text"].get<std::string>(), std::string("2026-10-01 по 2026-10-31"));
+    CHECK_EQ(conv_of(h.ai, 2), conv);
+    CHECK_EQ(h.ai.chat_creates[2].key, "tg:" + std::to_string(kUser) + ":122:chat");
+    CHECK_EQ(h.tg.edits.back().message_id, parsing_id);
+    CHECK_EQ(h.tg.edits.back().text, std::string(bot::texts::kChatThinking));
+    answer("За октябрь 2026 на Baby Sitter — 2899.00 EUR.");
+    CHECK_EQ(h.tg.edits.back().text, std::string("За октябрь 2026 на Baby Sitter — 2899.00 EUR.\n\n— LM Studio"));
+
+    // В окне трата своими словами — всё ещё трата (через parse_expense).
+    h.bot->handle(expense_message("кофе 200", 123));
+    CHECK_EQ(h.ai.creates.size(), 2u);
+    CHECK_EQ(h.ai.chat_creates.size(), 3u);
+    h.ai.job_next = job(ai::JobResult::Status::Done, draft_result("200", "Кафе"));
+    h.bot->ai_tick();
+    CHECK(contains(h.tg.edits.back().text, "Понял из текста"));
+
+    // Сумма не разобралась, not_expense, чат не создан — прежний текст ошибки суммы.
+    h.ai.chat_create_next.status = ai::CreateResult::Status::Unavailable;
+    h.bot->handle(expense_message("1,200.50 кафе", 124));
+    h.ai.job_next = job(ai::JobResult::Status::Done, {{"outcome", "not_expense"}});
+    h.bot->ai_tick();
+    CHECK(contains(h.tg.edits.back().text, "Не понял сумму"));
 }
