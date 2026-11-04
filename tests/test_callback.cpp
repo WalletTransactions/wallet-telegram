@@ -41,3 +41,38 @@ TEST(callback_parse_rejects_garbage) {
         }
     }
 }
+
+TEST(callback_ai_strict_format) {
+    using callback::AiKind;
+    auto sel = callback::parse_ai("ai:sel:claude");
+    REQUIRE(sel.has_value());
+    CHECK(sel->kind == AiKind::Select);
+    CHECK_EQ(sel->provider, std::string("claude"));
+    CHECK(callback::parse_ai("ai:consent:claude")->kind == AiKind::Consent);
+    CHECK(callback::parse_ai("ai:revoke:claude")->kind == AiKind::Revoke);
+    auto back = callback::parse_ai("ai:back");
+    REQUIRE(back.has_value());
+    CHECK(back->kind == AiKind::Back);
+    CHECK(back->provider.empty());
+
+    // Туда-обратно.
+    CHECK_EQ(callback::make_ai(AiKind::Select, "lmstudio"), std::string("ai:sel:lmstudio"));
+    CHECK_EQ(callback::make_ai(AiKind::Back), std::string("ai:back"));
+    CHECK(callback::parse_ai(callback::make_ai(AiKind::Revoke, "claude"))->kind == AiKind::Revoke);
+
+    // Подделки и мусор.
+    CHECK(!callback::parse_ai("ai:sel:../../admin").has_value());
+    CHECK(!callback::parse_ai("ai:sel:").has_value());          // пустой провайдер
+    CHECK(!callback::parse_ai("ai:sel:claude:x").has_value());  // лишние поля
+    CHECK(!callback::parse_ai("ai:sel:Claude").has_value());    // только [a-z]
+    CHECK(!callback::parse_ai("ai:sel:abcdefghijklmnopq").has_value()); // 17 букв
+    CHECK(callback::parse_ai("ai:sel:abcdefghijklmnop").has_value());   // 16 — можно
+    CHECK(!callback::parse_ai("ai:drop:claude").has_value());   // неизвестное действие
+    CHECK(!callback::parse_ai("ai:back:x").has_value());
+    CHECK(!callback::parse_ai("ai:").has_value());
+    CHECK(!callback::parse_ai("30:ok").has_value());            // кнопка черновика — не ai
+    CHECK(callback::is_ai("ai:whatever"));
+    CHECK(!callback::is_ai("30:ok"));
+    // Кнопки черновика не путаются с ai.
+    CHECK(!callback::parse("ai:back").has_value());
+}

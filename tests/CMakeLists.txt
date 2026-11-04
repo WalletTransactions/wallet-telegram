@@ -10,6 +10,7 @@ add_executable(wallet_telegram_tests
     test_metrics.cpp
     test_bot.cpp
     test_ai_client.cpp
+    test_chat_routing.cpp
 )
 target_include_directories(wallet_telegram_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(wallet_telegram_tests PRIVATE wallet_telegram_core)

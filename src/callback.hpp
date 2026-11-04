@@ -35,4 +35,24 @@ std::optional<Action> parse(const std::string& data);
 // Для логов: "c", "cp", "w", ...
 const char* kind_name(Kind kind);
 
+// Кнопки /ai (openspec/changes/add-ai-chat, D6) — префикс "ai:":
+//
+//   ai:sel:<provider>      выбрать провайдера
+//   ai:consent:<provider>  «Согласен» на экране согласия
+//   ai:revoke:<provider>   «Отозвать согласие»
+//   ai:back                «Отмена» — вернуться на экран /ai
+//
+// provider — только [a-z]{1,16}; всё прочее с префиксом "ai:" — nullopt.
+enum class AiKind { Select, Consent, Revoke, Back };
+
+struct AiAction {
+    AiKind kind = AiKind::Back;
+    std::string provider; // пусто у Back
+};
+
+bool is_ai(const std::string& data); // начинается с "ai:"
+std::string make_ai(AiKind kind, const std::string& provider = {});
+std::optional<AiAction> parse_ai(const std::string& data);
+const char* ai_kind_name(AiKind kind);
+
 } // namespace callback
