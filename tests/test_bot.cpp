@@ -1215,6 +1215,29 @@ public:
         ++enabled_calls;
         return enabled_value;
     }
+    ai::CreateResult create_chat(const std::string& token, const json& input, const std::string& key) override {
+        chat_creates.push_back({token, input, key});
+        return chat_create_next;
+    }
+    ai::SettingsResult get_settings(const std::string&) override {
+        ++settings_gets;
+        return settings_next;
+    }
+    ai::SettingsResult put_settings(const std::string&, const json& body) override {
+        settings_puts.push_back(body);
+        if (put_results.empty()) return settings_next;
+        ai::SettingsResult r = put_results.front();
+        put_results.erase(put_results.begin());
+        if (r.status == ai::SettingsResult::Status::Ok) settings_next = r; // GET дальше видит новый выбор
+        return r;
+    }
+
+    std::vector<Create> chat_creates;
+    ai::CreateResult chat_create_next = created("chat-1");
+    int settings_gets = 0;
+    std::vector<json> settings_puts;
+    ai::SettingsResult settings_next;
+    std::vector<ai::SettingsResult> put_results;
 
     std::vector<Create> creates;
     std::vector<std::pair<std::string, std::string>> gets;
@@ -1365,10 +1388,13 @@ TEST(ai_rejected_not_expense_expired_bad_amount) {
     h.bot->ai_tick();
     CHECK(contains(h.tg.edits.back().text, "Понял так: 200,00"));
 
+    // not_expense уходит в чат (D3); чат не создан (503) — прежний запасной ответ.
     h.ai.create_next = FakeAi::created("job-2");
+    h.ai.chat_create_next.status = ai::CreateResult::Status::Unavailable;
     h.bot->handle(expense_message("кофе 200", 41));
     h.ai.job_next = job(ai::JobResult::Status::Done, {{"outcome", "not_expense"}});
     h.bot->ai_tick();
+    CHECK_EQ(h.ai.chat_creates.size(), 1u);
     CHECK_EQ(h.tg.edits.back().text, std::string(bot::texts::kAiNotUnderstood));
 
     // Сумма не разобралась строгим форматом — ИИ; задание истекло — прежний текст ошибки.
@@ -1416,4 +1442,417 @@ TEST(ai_help_line_only_when_enabled) {
     h.bot->handle(private_message("/help"));
     CHECK(!contains(h.last_reply(), bot::texts::kHelpAi));
     CHECK_EQ(h.last_reply(), std::string(bot::texts::kHelp));
+}
+
+// ---- Вопросы к ИИ (openspec/changes/add-ai-chat) ----
+
+namespace {
+
+json chat_answer(const std::string& text, const std::string& provider = "lmstudio") {
+    return {{"text", text}, {"provider", provider}, {"conversation_id", "tg-x"}, {"steps", 2}};
+}
+
+std::string conv_of(const FakeAi& ai, std::size_t i) {
+    return ai.chat_creates.at(i).input["conversation_id"].get<std::string>();
+}
+
+} // namespace
+
+TEST(chat_routing_questions_vs_expenses) {
+    // Без связки — предложение подключиться, wallet-ai не вызывается.
+    {
+        Harness h;
+        FakeAi ai;
+        h.bot->enable_ai(&ai);
+        h.bot->handle(expense_message("сколько за няню?", 50));
+        CHECK_EQ(h.last_reply(), std::string(bot::texts::kNotLinked));
+        CHECK(ai.chat_creates.empty());
+    }
+    // Без WALLET_AI_URL — «Пока не понимаю…», /new и /ai — тоже непонятое.
+    {
+        Harness h;
+        h.link("w-1");
+        h.bot->handle(expense_message("сколько за няню?", 51));
+        CHECK_EQ(h.last_reply(), std::string(bot::texts::kUnknown));
+        h.bot->handle(private_message("/new"));
+        CHECK_EQ(h.last_reply(), std::string(bot::texts::kUnknown));
+    }
+
+    AiHarness h;
+    h.bot->handle(expense_message("сколько за няню?", 52));
+    REQUIRE(h.ai.chat_creates.size() == 1u);
+    const auto& c = h.ai.chat_creates[0];
+    CHECK_EQ(c.input["text"].get<std::string>(), std::string("сколько за няню?"));
+    CHECK_EQ(conv_of(h.ai, 0), "tg-" + std::to_string(kUser) + "-" + std::to_string(h.now));
+    CHECK_EQ(c.input["now"]["date"].get<std::string>(), std::string("2026-09-21")); // пояс пользователя — Москва
+    CHECK_EQ(c.input["now"]["time"].get<std::string>(), std::string("17:13:20"));
+    CHECK_EQ(c.key, "tg:" + std::to_string(kUser) + ":52");
+    CHECK_EQ(h.last_reply(), std::string(bot::texts::kChatThinking));
+    CHECK(h.bot->has_pending_ai());
+    CHECK(h.ai.creates.empty()); // не parse_expense
+
+    // Вопрос с цифрами — тоже в чат, а не в разбор траты.
+    h.bot->handle(expense_message("Сколько потратил в сентябре 2026", 53));
+    CHECK_EQ(h.ai.chat_creates.size(), 2u);
+    CHECK(h.ai.creates.empty());
+
+    // Трата своими словами — прежним путём.
+    h.bot->handle(expense_message("няня 3000", 54));
+    CHECK_EQ(h.ai.creates.size(), 1u);
+    CHECK_EQ(h.ai.chat_creates.size(), 2u);
+    // Строгая трата и «привет» — как раньше.
+    h.bot->handle(expense_message("350 продукты", 55));
+    CHECK(contains(h.last_reply(), "Понял так: 350,00"));
+    h.bot->handle(expense_message("привет", 56));
+    CHECK_EQ(h.last_reply(), std::string(bot::texts::kUnknown));
+    CHECK_EQ(h.ai.chat_creates.size(), 2u);
+}
+
+TEST(chat_answer_with_provider_signature) {
+    AiHarness h;
+    h.bot->handle(expense_message("сколько за няню в сентябре?", 60));
+    h.ai.job_next = job(ai::JobResult::Status::Pending);
+    h.bot->ai_tick();
+    CHECK(h.tg.edits.empty());
+
+    h.ai.job_next = job(ai::JobResult::Status::Done, chat_answer("За сентябрь 2026 на Baby Sitter — 2899.00 EUR."));
+    h.bot->ai_tick();
+    CHECK(!h.bot->has_pending_ai());
+    REQUIRE(!h.tg.edits.empty());
+    CHECK_EQ(h.tg.edits.back().message_id, 100); // «Думаю…» правится, нового сообщения нет
+    CHECK_EQ(h.tg.edits.back().text, std::string("За сентябрь 2026 на Baby Sitter — 2899.00 EUR.\n\n— LM Studio"));
+    CHECK_EQ(h.tg.sent.size(), 1u);
+
+    h.bot->handle(expense_message("а за август?", 61));
+    h.ai.job_next = job(ai::JobResult::Status::Done, chat_answer("1000.00 EUR.", "claude"));
+    h.bot->ai_tick();
+    CHECK_EQ(h.tg.edits.back().text, std::string("1000.00 EUR.\n\n— Claude"));
+
+    // Длинный ответ обрезается, подпись остаётся.
+    h.bot->handle(expense_message("покажи всё", 62));
+    h.ai.job_next = job(ai::JobResult::Status::Done, chat_answer(std::string(5000, 'x')));
+    h.bot->ai_tick();
+    CHECK(h.tg.edits.back().text.size() <= 4000u);
+    CHECK(contains(h.tg.edits.back().text, "\n\n— LM Studio"));
+}
+
+TEST(chat_failures_and_timeout) {
+    AiHarness h;
+    struct Case {
+        const char* failure;
+        const char* text;
+    };
+    std::int64_t upd = 70;
+    for (const Case& c : {Case{"tools_unavailable", bot::texts::kChatNoData}, Case{"auth_expired", bot::texts::kChatNoData},
+                          Case{"provider_refused", bot::texts::kChatRefused}, Case{"timeout", bot::texts::kChatFailed}}) {
+        h.bot->handle(expense_message("сколько за такси?", upd++));
+        h.ai.job_next = job(ai::JobResult::Status::Failed, json::object(), c.failure);
+        h.bot->ai_tick();
+        CHECK_EQ(h.tg.edits.back().text, std::string(c.text));
+    }
+    h.bot->handle(expense_message("сколько за такси?", upd++));
+    h.ai.job_next = job(ai::JobResult::Status::NotFound);
+    h.bot->ai_tick();
+    CHECK_EQ(h.tg.edits.back().text, std::string(bot::texts::kChatFailed));
+
+    // Зависшее задание: до предела ждём, на пределе — отмена и «не успел».
+    h.bot->handle(expense_message("сколько за такси?", upd++));
+    h.ai.job_next = job(ai::JobResult::Status::Pending);
+    h.now += h.config.chat_wait_secs - 1;
+    h.bot->ai_tick();
+    CHECK(h.bot->has_pending_ai());
+    CHECK(h.ai.cancels.empty());
+    h.now += 1;
+    h.bot->ai_tick();
+    CHECK(!h.bot->has_pending_ai());
+    CHECK_EQ(h.ai.cancels.size(), 1u);
+    CHECK_EQ(h.tg.edits.back().text, std::string(bot::texts::kChatTimeout));
+
+    // Предел chat — свой: parse_expense через 90 с уже сдался бы.
+    h.ai.cancels.clear();
+    h.bot->handle(expense_message("сколько за такси?", upd++));
+    h.now += bot::kAiGiveUpSecs;
+    h.bot->ai_tick();
+    CHECK(h.bot->has_pending_ai());
+}
+
+TEST(chat_not_created_answers_immediately) {
+    AiHarness h;
+    struct Case {
+        ai::CreateResult::Status status;
+        const char* text;
+    };
+    using S = ai::CreateResult::Status;
+    std::int64_t upd = 80;
+    for (const Case& c : {Case{S::ProviderUnavailable, bot::texts::kChatProviderUnavailable},
+                          Case{S::Unavailable, bot::texts::kChatOff}, Case{S::Busy, bot::texts::kChatBusy},
+                          Case{S::Error, bot::texts::kChatFailed}}) {
+        h.ai.chat_create_next.status = c.status;
+        std::size_t sent = h.tg.sent.size();
+        h.bot->handle(expense_message("сколько за няню?", upd++));
+        CHECK_EQ(h.tg.sent.size(), sent + 1); // одно сообщение — ответ, без «Думаю…»
+        CHECK_EQ(h.last_reply(), std::string(c.text));
+        CHECK(!h.bot->has_pending_ai());
+    }
+}
+
+TEST(chat_after_not_expense_in_same_message) {
+    AiHarness h;
+    h.bot->handle(expense_message("траты на такси за 2 недели", 90)); // нет признаков вопроса, есть цифра
+    REQUIRE(h.ai.creates.size() == 1u);
+    CHECK_EQ(h.last_reply(), std::string(bot::texts::kAiParsing));
+
+    h.ai.job_next = job(ai::JobResult::Status::Done, {{"outcome", "not_expense"}});
+    h.bot->ai_tick();
+    REQUIRE(h.ai.chat_creates.size() == 1u);
+    CHECK_EQ(h.ai.chat_creates[0].input["text"].get<std::string>(), std::string("траты на такси за 2 недели"));
+    CHECK_EQ(h.ai.chat_creates[0].key, "tg:" + std::to_string(kUser) + ":90:chat");
+    CHECK_EQ(h.tg.edits.back().message_id, 100);
+    CHECK_EQ(h.tg.edits.back().text, std::string(bot::texts::kChatThinking));
+    CHECK(h.bot->has_pending_ai()); // задание chat добавлено во время обхода и не потерялось
+
+    h.ai.job_next = job(ai::JobResult::Status::Done, chat_answer("На такси за 2 недели — 120.00 EUR."));
+    h.bot->ai_tick();
+    CHECK_EQ(h.tg.edits.back().message_id, 100);
+    CHECK_EQ(h.tg.edits.back().text, std::string("На такси за 2 недели — 120.00 EUR.\n\n— LM Studio"));
+    CHECK_EQ(h.tg.sent.size(), 1u); // всё в одном сообщении
+    CHECK(!h.bot->has_pending_ai());
+
+    // Rejected и трата с суммой в начале в чат не уходят.
+    h.bot->handle(expense_message("кофе 200", 91));
+    h.ai.job_next = job(ai::JobResult::Status::Done, {{"outcome", "rejected"}});
+    h.bot->ai_tick();
+    CHECK_EQ(h.tg.edits.back().text, std::string(bot::texts::kAiNotUnderstood));
+    CHECK_EQ(h.ai.chat_creates.size(), 1u);
+}
+
+TEST(chat_dialog_conversation_and_clarification) {
+    AiHarness h;
+    auto answer = [&](const std::string& text) {
+        h.ai.job_next = job(ai::JobResult::Status::Done, chat_answer(text));
+        h.bot->ai_tick();
+    };
+    h.bot->handle(expense_message("сколько за няню", 100));
+    answer("За какой месяц?");
+    std::string first = conv_of(h.ai, 0);
+
+    // Через минуту «сентябрь» — ответ на уточнение, тот же диалог.
+    h.now += 60;
+    h.bot->handle(expense_message("сентябрь", 101));
+    REQUIRE(h.ai.chat_creates.size() == 2u);
+    CHECK_EQ(h.ai.chat_creates[1].input["text"].get<std::string>(), std::string("сентябрь"));
+    CHECK_EQ(conv_of(h.ai, 1), first);
+    answer("2899.00 EUR.");
+
+    // Ответ без «?» — окно уточнения закрыто: «сентябрь» — непонятое.
+    h.bot->handle(expense_message("сентябрь", 102));
+    CHECK_EQ(h.last_reply(), std::string(bot::texts::kUnknown));
+    CHECK_EQ(h.ai.chat_creates.size(), 2u);
+
+    // Второй вопрос через 5 минут — тот же диалог.
+    h.now += 300;
+    h.bot->handle(expense_message("а за август?", 103));
+    CHECK_EQ(conv_of(h.ai, 2), first);
+    answer("За какой год?");
+
+    // Строгая трата в окне уточнения идёт прежним путём.
+    h.bot->handle(expense_message("200 кафе", 104));
+    CHECK(contains(h.last_reply(), "Понял так: 200,00"));
+    CHECK_EQ(h.ai.chat_creates.size(), 3u);
+
+    // Уточнение устарело (15 минут) — обычная маршрутизация.
+    h.now += 15 * 60;
+    h.bot->handle(expense_message("в 2026", 105)); // текст с цифрой — разбор траты, не чат
+    CHECK_EQ(h.ai.chat_creates.size(), 3u);
+    CHECK_EQ(h.ai.creates.size(), 1u);
+
+    // /new — новый разговор.
+    h.bot->handle(private_message("/new"));
+    CHECK_EQ(h.last_reply(), std::string(bot::texts::kChatNew));
+    h.bot->handle(expense_message("сколько за няню?", 106));
+    std::string second = conv_of(h.ai, 3);
+    CHECK(second != first);
+
+    // 30 минут без вопросов — тоже новый.
+    h.now += bot::kChatIdleSecs;
+    h.bot->handle(expense_message("сколько за няню?", 107));
+    CHECK(conv_of(h.ai, 4) != second);
+    CHECK(conv_of(h.ai, 4) != first);
+
+    // /new без связки — предложение подключиться.
+    h.store.delete_link(kUser);
+    h.bot->handle(private_message("/new"));
+    CHECK_EQ(h.last_reply(), std::string(bot::texts::kNotLinked));
+}
+
+TEST(chat_conversation_ids_survive_restart) {
+    AiHarness h;
+    h.bot->handle(expense_message("сколько за няню?", 110));
+    std::string before = conv_of(h.ai, 0);
+    // Рестарт через секунду: новый процесс, состояние в памяти потеряно.
+    h.now += 1;
+    h.rebuild();
+    h.bot->enable_ai(&h.ai);
+    h.bot->handle(expense_message("сколько за няню?", 111));
+    CHECK(conv_of(h.ai, 1) != before);
+}
+
+TEST(help_lists_questions_and_ai_commands_when_enabled) {
+    AiHarness h;
+    h.bot->handle(private_message("/help"));
+    std::string help = h.last_reply();
+    CHECK(contains(help, bot::texts::kHelpAi));
+    CHECK(contains(help, bot::texts::kHelpAsk));
+    CHECK(contains(help, "/ai — кто отвечает на вопросы"));
+    CHECK(contains(help, "/new — новый разговор"));
+    CHECK(help.find("/new — новый разговор") < help.find("/help — эта справка")); // команды — в списке команд
+
+    h.ai.enabled_value = false;
+    h.now += 61;
+    h.bot->handle(private_message("/help"));
+    CHECK_EQ(h.last_reply(), std::string(bot::texts::kHelp));
+}
+
+// ---- /ai и согласие (спека ai-provider-choice) ----
+
+namespace {
+
+ai::SettingsResult settings(const std::string& provider, bool claude_available, bool claude_consented) {
+    ai::SettingsResult r;
+    r.status = ai::SettingsResult::Status::Ok;
+    r.settings = {{"provider", provider},
+                  {"providers",
+                   {{{"id", "lmstudio"}, {"available", true}, {"cloud", false}, {"consented", false},
+                     {"requires_consent", false}, {"title", "Локальная модель (LM Studio)"}},
+                    {{"id", "claude"}, {"available", claude_available}, {"cloud", true},
+                     {"consented", claude_consented}, {"requires_consent", true}, {"title", "Claude (Anthropic)"}}}}};
+    return r;
+}
+
+ai::SettingsResult settings_status(ai::SettingsResult::Status s) {
+    ai::SettingsResult r;
+    r.status = s;
+    return r;
+}
+
+} // namespace
+
+TEST(ai_screen_render) {
+    auto s = bot::render_ai_screen(settings("lmstudio", true, false).settings);
+    CHECK_EQ(s.text, std::string("Сейчас отвечает: LM Studio"));
+    CHECK_EQ(buttons(s.keyboard), std::string("✓ LM Studio=ai:sel:lmstudio|Claude=ai:sel:claude"));
+
+    // Claude с согласием — отдельная кнопка «Отозвать согласие».
+    s = bot::render_ai_screen(settings("claude", true, true).settings);
+    CHECK_EQ(s.text, std::string("Сейчас отвечает: Claude"));
+    CHECK_EQ(buttons(s.keyboard),
+             std::string("LM Studio=ai:sel:lmstudio|✓ Claude=ai:sel:claude|Отозвать согласие=ai:revoke:claude"));
+
+    // Недоступный провайдер кнопки не получает.
+    s = bot::render_ai_screen(settings("lmstudio", false, false).settings);
+    CHECK_EQ(buttons(s.keyboard), std::string("✓ LM Studio=ai:sel:lmstudio"));
+
+    // Мусорный id из ответа не становится кнопкой.
+    json odd = settings("lmstudio", true, false).settings;
+    odd["providers"].push_back({{"id", "../x"}, {"available", true}});
+    CHECK_EQ(buttons(bot::render_ai_screen(odd).keyboard),
+             std::string("✓ LM Studio=ai:sel:lmstudio|Claude=ai:sel:claude"));
+}
+
+TEST(ai_command_shows_screen_or_unavailable) {
+    AiHarness h;
+    h.ai.settings_next = settings("lmstudio", true, false);
+    h.bot->handle(private_message("/ai"));
+    CHECK_EQ(h.last_reply(), std::string("Сейчас отвечает: LM Studio"));
+    CHECK_EQ(buttons(h.tg.keyboards.back()), std::string("✓ LM Studio=ai:sel:lmstudio|Claude=ai:sel:claude"));
+
+    h.ai.settings_next = settings_status(ai::SettingsResult::Status::Unavailable);
+    h.bot->handle(private_message("/ai"));
+    CHECK_EQ(h.last_reply(), std::string(bot::texts::kUnavailable));
+    CHECK(h.tg.keyboards.back().empty());
+
+    // Без связки — предложение подключиться, wallet-ai не вызывается.
+    int gets = h.ai.settings_gets;
+    h.store.delete_link(kUser);
+    h.bot->handle(private_message("/ai"));
+    CHECK_EQ(h.last_reply(), std::string(bot::texts::kNotLinked));
+    CHECK_EQ(h.ai.settings_gets, gets);
+}
+
+TEST(ai_choose_claude_with_consent_then_revoke) {
+    AiHarness h;
+    h.ai.settings_next = settings("lmstudio", true, false);
+    h.bot->handle(private_message("/ai")); // message_id 100
+
+    // Первый выбор Claude: 409 — экран согласия, выбор не меняется.
+    h.ai.put_results = {settings_status(ai::SettingsResult::Status::ConsentRequired)};
+    h.bot->handle(press("ai:sel:claude"));
+    REQUIRE(h.ai.settings_puts.size() == 1u);
+    CHECK_EQ(h.ai.settings_puts[0], json({{"provider", "claude"}}));
+    CHECK_EQ(h.tg.edits.back().message_id, 100);
+    CHECK_EQ(h.tg.edits.back().text, std::string(bot::texts::kAiConsent));
+    CHECK_EQ(buttons(h.tg.edits.back().keyboard), std::string("Согласен=ai:consent:claude|Отмена=ai:back"));
+    CHECK_EQ(h.tg.answers.size(), 1u);
+
+    // «Отмена» — снова экран /ai, PUT не уходил.
+    h.bot->handle(press("ai:back"));
+    CHECK_EQ(h.ai.settings_puts.size(), 1u);
+    CHECK_EQ(h.tg.edits.back().text, std::string("Сейчас отвечает: LM Studio"));
+
+    // «Согласен» — PUT с consent: true, экран под Claude.
+    h.ai.put_results = {settings("claude", true, true)};
+    h.bot->handle(press("ai:consent:claude"));
+    REQUIRE(h.ai.settings_puts.size() == 2u);
+    CHECK_EQ(h.ai.settings_puts[1], json({{"provider", "claude"}, {"consent", true}}));
+    CHECK_EQ(h.tg.edits.back().text, std::string("Сейчас отвечает: Claude"));
+    CHECK_EQ(h.tg.answers.back().text, std::string(bot::texts::kAiDone));
+
+    // Возврат на LM Studio кнопкой.
+    h.ai.put_results = {settings("lmstudio", true, true)};
+    h.bot->handle(press("ai:sel:lmstudio"));
+    CHECK_EQ(h.ai.settings_puts[2], json({{"provider", "lmstudio"}}));
+    CHECK_EQ(h.tg.edits.back().text, std::string("Сейчас отвечает: LM Studio"));
+
+    // Отзыв согласия: consent: false, кнопки «Отозвать» больше нет.
+    h.ai.put_results = {settings("lmstudio", true, false)};
+    h.bot->handle(press("ai:revoke:claude"));
+    CHECK_EQ(h.ai.settings_puts[3], json({{"provider", "claude"}, {"consent", false}}));
+    CHECK_EQ(h.tg.edits.back().text, std::string("Сейчас отвечает: LM Studio"));
+    CHECK(buttons(h.tg.edits.back().keyboard).find("Отозвать") == std::string::npos);
+
+    // 400 provider_unavailable — ответ на нажатие «Сейчас недоступен».
+    h.ai.put_results = {settings_status(ai::SettingsResult::Status::ProviderUnavailable)};
+    std::size_t edits = h.tg.edits.size();
+    h.bot->handle(press("ai:sel:claude"));
+    CHECK_EQ(h.tg.answers.back().text, std::string(bot::texts::kAiProviderNotAvailable));
+    CHECK_EQ(h.tg.edits.size(), edits);
+    // На каждое нажатие — ровно один ответ.
+    CHECK_EQ(h.tg.answers.size(), 6u);
+}
+
+TEST(ai_callback_untrusted_and_link_checked) {
+    AiHarness h;
+    h.ai.settings_next = settings("lmstudio", true, false);
+    h.bot->handle(press("ai:sel:../../admin"));
+    REQUIRE(h.tg.answers.size() == 1u);
+    CHECK_EQ(h.tg.answers[0].text, std::string(""));
+    h.bot->handle(press("ai:sel:claude:x"));
+    h.bot->handle(press("ai:"));
+    CHECK_EQ(h.tg.answers.size(), 3u);
+    CHECK(h.ai.settings_puts.empty());
+    CHECK_EQ(h.ai.settings_gets, 0);
+
+    // Связка проверяется на каждом нажатии.
+    h.store.delete_link(kUser);
+    h.bot->handle(press("ai:sel:lmstudio"));
+    CHECK_EQ(h.tg.answers.back().text, std::string(bot::texts::kNotLinked));
+    CHECK(h.tg.answers.back().alert);
+    CHECK(h.ai.settings_puts.empty());
+
+    // Без WALLET_AI_URL кнопки ai: тоже ничего не делают.
+    Harness plain;
+    plain.link("w-1");
+    plain.bot->handle(press("ai:sel:lmstudio"));
+    REQUIRE(plain.tg.answers.size() == 1u);
+    CHECK_EQ(plain.tg.answers[0].text, std::string(""));
 }

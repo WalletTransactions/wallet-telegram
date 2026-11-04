@@ -69,4 +69,51 @@ std::optional<Action> parse(const std::string& data) {
 
 const char* kind_name(Kind kind) { return spec_of(kind).code; }
 
+namespace {
+
+constexpr const char* kAiPrefix = "ai:";
+
+bool provider_id(const std::string& s) {
+    if (s.empty() || s.size() > 16) return false;
+    for (char c : s) {
+        if (c < 'a' || c > 'z') return false;
+    }
+    return true;
+}
+
+} // namespace
+
+bool is_ai(const std::string& data) { return data.compare(0, 3, kAiPrefix) == 0; }
+
+const char* ai_kind_name(AiKind kind) {
+    switch (kind) {
+    case AiKind::Select: return "sel";
+    case AiKind::Consent: return "consent";
+    case AiKind::Revoke: return "revoke";
+    case AiKind::Back: return "back";
+    }
+    return "back";
+}
+
+std::string make_ai(AiKind kind, const std::string& provider) {
+    if (kind == AiKind::Back) return "ai:back";
+    return std::string(kAiPrefix) + ai_kind_name(kind) + ":" + provider;
+}
+
+std::optional<AiAction> parse_ai(const std::string& data) {
+    if (!is_ai(data)) return std::nullopt;
+    std::string rest = data.substr(3);
+    if (rest == "back") return AiAction{AiKind::Back, {}};
+    std::size_t colon = rest.find(':');
+    if (colon == std::string::npos) return std::nullopt;
+    std::string verb = rest.substr(0, colon);
+    std::string provider = rest.substr(colon + 1);
+    // Лишние поля («ai:sel:claude:x»), «..», «/», заглавные — не провайдер.
+    if (!provider_id(provider)) return std::nullopt;
+    for (AiKind k : {AiKind::Select, AiKind::Consent, AiKind::Revoke}) {
+        if (verb == ai_kind_name(k)) return AiAction{k, provider};
+    }
+    return std::nullopt;
+}
+
 } // namespace callback

@@ -61,6 +61,7 @@ configure_file(
 add_library(wallet_telegram_core STATIC
     src/bot.cpp
     src/callback.cpp
+    src/chat_routing.cpp
     src/card.cpp
     src/drafts.cpp
     src/telegram_client.cpp

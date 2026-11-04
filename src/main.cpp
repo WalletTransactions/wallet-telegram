@@ -127,6 +127,9 @@ int main() {
     config.default_tz = env_or("TELEGRAM_DEFAULT_TZ", "UTC");
     config.allowed_user_ids = parse_id_list(env_or("TELEGRAM_ALLOWED_USER_IDS", ""));
     int poll_timeout_secs = std::stoi(env_or("TELEGRAM_POLL_TIMEOUT_SECS", "25"));
+    // Ожидание ответа на вопрос к ИИ (add-ai-chat, D4): дедлайн chat у
+    // wallet-ai 120 с плюс очередь.
+    config.chat_wait_secs = std::stol(env_or("TG_CHAT_WAIT_SECS", "150"));
 
     // Одно соединение, не пул: к базе ходит только поток поллинга, по одному
     // апдейту за раз.

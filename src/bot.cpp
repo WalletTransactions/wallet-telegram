@@ -8,6 +8,7 @@
 
 #include "callback.hpp"
 #include "card.hpp"
+#include "chat_routing.hpp"
 #include "expense/strict.hpp"
 #include "expense/text.hpp"
 #include "util/log.hpp"
@@ -59,7 +60,73 @@ const char* const kDraftStale = "Черновик устарел — отпра�
 const char* const kAiParsing = "Разбираю…";
 const char* const kAiNotUnderstood = "Не понял. Пример: 350 продукты @тинькофф вчера";
 const char* const kHelpAi = "Можно и своими словами: «кофе 200», «вчера такси 450 с тинькоффа».\n";
+const char* const kHelpAsk = "Можно спросить: «сколько за няню в сентябре?», «чем октябрь отличается от сентября?»\n";
+const char* const kHelpAiCommands = "/ai — кто отвечает на вопросы\n/new — новый разговор\n";
+const char* const kChatThinking = "Думаю…";
+const char* const kChatTimeout = "ИИ не успел ответить, попробуйте позже.";
+const char* const kChatProviderUnavailable = "Выбранный ИИ сейчас недоступен. /ai — выбрать другой.";
+const char* const kChatOff = "ИИ сейчас выключен.";
+const char* const kChatBusy = "ИИ занят, попробуйте через минуту.";
+const char* const kChatNoData = "Не удалось получить данные кошелька, попробуйте позже.";
+const char* const kChatRefused = "ИИ не стал отвечать на этот вопрос.";
+const char* const kChatFailed = "ИИ не смог ответить, попробуйте позже.";
+const char* const kChatNew = "Начали новый разговор.";
+const char* const kAiNow = "Сейчас отвечает: ";
+// Константа бота, а не ответ wallet-ai (D6): текст согласия должен быть виден,
+// даже если wallet-ai вернул неожиданный title.
+const char* const kAiConsent =
+    "Вопросы и данные кошелька, нужные для ответа (суммы, категории, комментарии операций), будут отправляться в "
+    "Anthropic. Согласны?";
+const char* const kAiDone = "Готово";
+const char* const kAiProviderNotAvailable = "Сейчас недоступен";
 } // namespace texts
+
+namespace {
+
+// Короткое имя провайдера для экрана и кнопок; неизвестный — title из
+// wallet-ai, иначе id.
+std::string provider_name(const std::string& id, const json& entry) {
+    if (id == "lmstudio") return "LM Studio";
+    if (id == "claude") return "Claude";
+    if (entry.is_object() && entry.contains("title") && entry["title"].is_string()) return entry["title"].get<std::string>();
+    return id;
+}
+
+} // namespace
+
+AiScreen render_ai_screen(const json& settings) {
+    AiScreen s;
+    std::string selected = settings.value("provider", std::string{});
+    json selected_entry;
+    std::vector<telegram::Button> providers;
+    std::vector<std::vector<telegram::Button>> revokes;
+    for (const auto& p : settings.value("providers", json::array())) {
+        if (!p.is_object() || !p.contains("id") || !p["id"].is_string()) continue;
+        std::string id = p["id"].get<std::string>();
+        if (id == selected) selected_entry = p;
+        // Кнопку получает только то, что прошло бы строгий разбор callback.
+        if (!callback::parse_ai(callback::make_ai(callback::AiKind::Select, id))) continue;
+        if (p.value("available", false)) {
+            providers.push_back({(id == selected ? "✓ " : "") + provider_name(id, p),
+                                 callback::make_ai(callback::AiKind::Select, id)});
+        }
+        if (p.value("cloud", false) && p.value("consented", false)) {
+            revokes.push_back({{"Отозвать согласие", callback::make_ai(callback::AiKind::Revoke, id)}});
+        }
+    }
+    s.text = std::string(texts::kAiNow) + provider_name(selected, selected_entry);
+    if (!providers.empty()) s.keyboard.push_back(providers);
+    for (auto& row : revokes) s.keyboard.push_back(std::move(row));
+    return s;
+}
+
+AiScreen render_ai_consent(const std::string& provider) {
+    AiScreen s;
+    s.text = texts::kAiConsent;
+    s.keyboard = {{{"Согласен", callback::make_ai(callback::AiKind::Consent, provider)},
+                   {"Отмена", callback::make_ai(callback::AiKind::Back)}}};
+    return s;
+}
 
 namespace {
 
@@ -372,10 +439,18 @@ void Bot::handle(const telegram::Update& update) {
         std::string help = texts::kHelp;
         if (ai_ != nullptr) {
             auto link = store_.find_link(update.from_id);
-            // Строка про свободный текст — только когда ИИ правда работает.
+            // Строки про свободный текст, вопросы и команды ИИ — только когда
+            // ИИ правда работает.
             static const std::string kAfter = "запишу после «✓ Записать».\n";
-            std::size_t at = help.find(kAfter);
-            if (link && at != std::string::npos && ai_enabled_for(*link)) help.insert(at + kAfter.size(), texts::kHelpAi);
+            static const std::string kBeforeHelp = "/help — эта справка";
+            if (link && ai_enabled_for(*link)) {
+                std::size_t cmds = help.find(kBeforeHelp);
+                if (cmds != std::string::npos) help.insert(cmds, texts::kHelpAiCommands);
+                std::size_t at = help.find(kAfter);
+                if (at != std::string::npos) {
+                    help.insert(at + kAfter.size(), std::string(texts::kHelpAi) + texts::kHelpAsk);
+                }
+            }
         }
         reply(update, help);
         return;
@@ -383,7 +458,10 @@ void Bot::handle(const telegram::Update& update) {
 
     static const std::unordered_set<std::string> kLinkedCommands = {"wallets", "categories", "last",
                                                                     "default", "tz",         "unlink"};
-    if (kLinkedCommands.count(cmd.name) != 0) {
+    // Команды ИИ — только при заданном WALLET_AI_URL; без него — непонятое.
+    static const std::unordered_set<std::string> kAiCommands = {"new", "ai"};
+    bool ai_command = ai_ != nullptr && kAiCommands.count(cmd.name) != 0;
+    if (kLinkedCommands.count(cmd.name) != 0 || ai_command) {
         count_update(cmd.name);
         auto link = store_.find_link(update.from_id);
         if (!link) {
@@ -396,6 +474,8 @@ void Bot::handle(const telegram::Update& update) {
         else if (cmd.name == "last") handle_last(update, *link, cmd.args);
         else if (cmd.name == "default") handle_default(update, *link, cmd.args);
         else if (cmd.name == "tz") handle_tz(update, *link, cmd.args);
+        else if (cmd.name == "new") handle_new(update, *link);
+        else if (cmd.name == "ai") handle_ai(update, *link);
         else handle_unlink(update, *link);
         return;
     }
@@ -410,6 +490,20 @@ void Bot::handle(const telegram::Update& update) {
         applog::set_user(link->user_id);
         handle_expense(update, *link);
         return;
+    }
+
+    // Вопрос к ИИ (D2): сначала ответ на уточнение — «сентябрь» после «За
+    // какой месяц?» не похож ни на вопрос, ни на трату, — потом признаки
+    // вопроса. Без связки — общий ответ ниже («подключите»), wallet-ai не зовётся.
+    if (cmd.name.empty() && ai_ != nullptr &&
+        (awaiting_reply(update.from_id, now()) || chat_routing::looks_like_question(update.text))) {
+        auto link = store_.find_link(update.from_id);
+        if (link) {
+            count_update("question");
+            applog::set_user(link->user_id);
+            start_chat(update, *link, /*edit_message_id=*/0, /*after_not_expense=*/false);
+            return;
+        }
     }
 
     // Не с суммы, но цифра есть («кофе 200») — свободным текстом через ИИ.
@@ -884,8 +978,11 @@ void Bot::try_ai(const telegram::Update& update, const links::Link& link, const 
 
 void Bot::ai_tick() {
     if (ai_ == nullptr || pending_ai_.empty()) return;
-    std::vector<PendingAi> still;
-    for (auto& p : pending_ai_) {
+    // Обработка может добавить задание (not_expense -> chat, D3): обходим
+    // снятую копию, новые и незавершённые копятся в pending_ai_.
+    std::vector<PendingAi> current;
+    current.swap(pending_ai_);
+    for (auto& p : current) {
         applog::set_trace_id(applog::new_trace_id());
         bool finished = true;
         try {
@@ -896,9 +993,8 @@ void Bot::ai_tick() {
                           {{"event", "tg_ai_job_failed"}, {"job_id", p.job_id}, {"error", e.what()}});
         }
         applog::clear_request_context();
-        if (!finished) still.push_back(std::move(p));
+        if (!finished) pending_ai_.push_back(std::move(p));
     }
-    pending_ai_ = std::move(still);
 }
 
 bool Bot::process_pending_ai(PendingAi& p) {
@@ -922,6 +1018,7 @@ bool Bot::process_pending_ai(PendingAi& p) {
         return finish("unlinked");
     }
     applog::set_user(link->user_id);
+    if (p.kind == PendingAi::Kind::Chat) return process_pending_chat(p, *link, t);
     bool give_up = t - p.created_at >= kAiGiveUpSecs;
 
     ai::JobResult job;
@@ -959,6 +1056,12 @@ bool Bot::process_pending_ai(PendingAi& p) {
                         p.message_id);
             return finish("draft");
         }
+        // Текст не с суммы и не трата — вероятно, вопрос без признаков
+        // («траты на такси за 2 недели»): в чат тем же сообщением (D3).
+        if (outcome == "not_expense" && p.fallback.kind == AiFallback::Kind::NotUnderstood) {
+            start_chat(p.update, *link, p.message_id, /*after_not_expense=*/true);
+            return finish("not_expense_chat");
+        }
         run_fallback(p.update, *link, p.fallback, p.message_id);
         return finish(outcome == "not_expense" ? "not_expense" : "rejected");
     }
@@ -972,6 +1075,285 @@ bool Bot::process_pending_ai(PendingAi& p) {
         return finish(job.status == S::NotFound ? "expired" : (job.status == S::Cancelled ? "cancelled" : "unauthorized"));
     }
     return true;
+}
+
+void Bot::start_chat(const telegram::Update& update, const links::Link& link, std::int64_t edit_message_id,
+                     bool after_not_expense) {
+    std::time_t t = now();
+    json input = {{"text", update.text},
+                  {"conversation_id", conversation_for(link.tg_user_id, t)},
+                  {"now", {{"date", tz::local_date(link.tz, t)}, {"time", tz::local_time_seconds(link.tz, t)}}}};
+    // Повторная доставка апдейта — то же задание. После not_expense ключ
+    // tg:<id>:<update_id> уже занят заданием parse_expense — свой суффикс.
+    std::string key = "tg:" + std::to_string(link.tg_user_id) + ":" + std::to_string(update.update_id);
+    if (after_not_expense) key += ":chat";
+
+    ai::CreateResult created;
+    bool called = with_token(update, link, [&](const std::string& token) {
+        created = ai_->create_chat(token, input, key);
+        return created.status == ai::CreateResult::Status::Unauthorized;
+    });
+    if (!called) return; // пользователю уже ответили (сессия отозвана, google-auth недоступен)
+    metrics::inc_counter("tg_chat_jobs_total", "Создание заданий chat у бота по итогу.", "result",
+                         ai::to_string(created.status));
+    if (created.status != ai::CreateResult::Status::Created) {
+        applog::info("chat job not created", {{"event", "tg_chat_job_not_created"},
+                                              {"tg_user_id", link.tg_user_id},
+                                              {"status", ai::to_string(created.status)},
+                                              {"error", created.error}});
+        if (after_not_expense) {
+            // Чата нет — ответ, как будто ИИ не помог с тратой.
+            respond(update, texts::kAiNotUnderstood, edit_message_id);
+            return;
+        }
+        using S = ai::CreateResult::Status;
+        const char* text = texts::kChatFailed;
+        if (created.status == S::ProviderUnavailable) text = texts::kChatProviderUnavailable;
+        else if (created.status == S::Unavailable) text = texts::kChatOff;
+        else if (created.status == S::Busy) text = texts::kChatBusy;
+        respond(update, text, edit_message_id);
+        return;
+    }
+
+    PendingAi p;
+    p.kind = PendingAi::Kind::Chat;
+    p.job_id = created.job_id;
+    p.update = update;
+    p.created_at = t;
+    if (edit_message_id != 0) {
+        tg_.edit_message(update.chat_id, edit_message_id, texts::kChatThinking, {});
+        p.message_id = edit_message_id;
+    } else {
+        p.message_id = tg_.send_message(update.chat_id, texts::kChatThinking, {});
+    }
+    applog::info("chat job created", {{"event", "tg_chat_job_created"},
+                                      {"tg_user_id", link.tg_user_id},
+                                      {"job_id", p.job_id},
+                                      {"conversation_id", input["conversation_id"]},
+                                      {"after_not_expense", after_not_expense}});
+    pending_ai_.push_back(std::move(p));
+}
+
+bool Bot::process_pending_chat(PendingAi& p, const links::Link& link, std::time_t t) {
+    auto finish = [&](const char* outcome, const std::string& failure = {}, const std::string& provider = {}) {
+        metrics::inc_counter("tg_chat_outcome_total", "Итог заданий chat у бота.", "outcome", outcome);
+        metrics::observe_duration("tg_chat_wait_seconds", "От «Думаю…» до итога.", "outcome", outcome,
+                                  static_cast<double>(t - p.created_at));
+        applog::info("chat job finished", {{"event", "tg_chat_job_finished"},
+                                           {"tg_user_id", p.update.from_id},
+                                           {"job_id", p.job_id},
+                                           {"outcome", outcome},
+                                           {"failure", failure},
+                                           {"provider", provider},
+                                           {"wait_secs", t - p.created_at}});
+        return true;
+    };
+    auto show = [&](const std::string& text) {
+        tg_.edit_message(p.update.chat_id, p.message_id, text::truncate_utf8(text, kMaxMessageBytes), {});
+    };
+    bool give_up = t - p.created_at >= config_.chat_wait_secs;
+
+    ai::JobResult job;
+    std::string token;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        sessions::Access access = sessions_.access_token(link.tg_user_id, /*force_refresh=*/attempt > 0);
+        if (access.status == sessions::Access::Status::Revoked) {
+            show(texts::kRevoked);
+            return finish("revoked");
+        }
+        if (access.status == sessions::Access::Status::Unavailable) {
+            if (!give_up) return false; // google-auth мигнул — следующий тик
+            show(texts::kChatTimeout);
+            return finish("gave_up");
+        }
+        token = access.token;
+        job = ai_->get_job(token, p.job_id);
+        if (job.status != ai::JobResult::Status::Unauthorized) break;
+    }
+
+    using S = ai::JobResult::Status;
+    switch (job.status) {
+    case S::Pending:
+    case S::Error:
+        if (!give_up) return false;
+        ai_->cancel_job(token, p.job_id); // ошибки отмены глотает клиент
+        show(texts::kChatTimeout);
+        return finish("gave_up", job.error);
+    case S::Done: {
+        std::string answer = trim(job.result.value("text", std::string{}));
+        std::string provider = job.result.value("provider", std::string{});
+        if (answer.empty()) {
+            show(texts::kChatFailed);
+            return finish("empty", {}, provider);
+        }
+        // Подпись — кто ответил (спека «Показ ответа»): пользователь видит,
+        // куда ушли данные. Обрезается текст, а не подпись.
+        std::string signature;
+        if (provider == "lmstudio") signature = "\n\n— LM Studio";
+        else if (provider == "claude") signature = "\n\n— Claude";
+        // truncate_utf8 дописывает «…» (3 байта) сверх предела — иначе
+        // повторная обрезка в show срезала бы подпись.
+        constexpr std::size_t kEllipsisBytes = 3;
+        show(text::truncate_utf8(answer, kMaxMessageBytes - signature.size() - kEllipsisBytes) + signature);
+        // Модель переспросила — следующий текст пользователя идёт в тот же диалог.
+        if (answer.back() == '?') chats_[link.tg_user_id].awaiting_reply_until = t + kChatReplyWindowSecs;
+        return finish("answer", {}, provider);
+    }
+    case S::Failed:
+        if (job.failure == "tools_unavailable" || job.failure == "auth_expired") show(texts::kChatNoData);
+        else if (job.failure == "provider_refused") show(texts::kChatRefused);
+        else show(texts::kChatFailed);
+        return finish("failed", job.failure);
+    case S::Cancelled:
+    case S::NotFound:
+    case S::Unauthorized:
+        show(texts::kChatFailed);
+        return finish(job.status == S::NotFound ? "expired" : (job.status == S::Cancelled ? "cancelled" : "unauthorized"));
+    }
+    return true;
+}
+
+std::string Bot::conversation_for(std::int64_t tg_user_id, std::time_t t) {
+    ChatState& c = chats_[tg_user_id];
+    if (c.seq == 0 || t - c.last_question_at >= kChatIdleSecs) new_conversation(tg_user_id, t);
+    c.last_question_at = t;
+    // Вопрос задан — окно уточнения израсходовано; новый ответ с «?» откроет его снова.
+    c.awaiting_reply_until = 0;
+    return "tg-" + std::to_string(tg_user_id) + "-" + std::to_string(c.seq);
+}
+
+void Bot::new_conversation(std::int64_t tg_user_id, std::time_t t) {
+    ChatState& c = chats_[tg_user_id];
+    // Номер не меньше текущего времени (D5): после рестарта бот не попадёт в
+    // историю wallet-ai прежнего процесса, а внутри процесса номера растут.
+    c.seq = std::max<std::int64_t>(c.seq + 1, static_cast<std::int64_t>(t));
+    c.last_question_at = t;
+    c.awaiting_reply_until = 0;
+}
+
+bool Bot::awaiting_reply(std::int64_t tg_user_id, std::time_t t) const {
+    auto it = chats_.find(tg_user_id);
+    return it != chats_.end() && t < it->second.awaiting_reply_until;
+}
+
+void Bot::handle_new(const telegram::Update& update, const links::Link& link) {
+    new_conversation(link.tg_user_id, now());
+    applog::info("chat conversation reset", {{"event", "tg_chat_new"}, {"tg_user_id", link.tg_user_id}});
+    reply(update, texts::kChatNew);
+}
+
+std::optional<ai::SettingsResult> Bot::ai_settings(const telegram::Update& update, const links::Link& link,
+                                                   const json* put_body) {
+    ai::SettingsResult r;
+    bool called = with_token(update, link, [&](const std::string& token) {
+        r = put_body != nullptr ? ai_->put_settings(token, *put_body) : ai_->get_settings(token);
+        return r.status == ai::SettingsResult::Status::Unauthorized;
+    });
+    if (!called) return std::nullopt;
+    metrics::inc_counter("tg_ai_settings_total", "Запросы бота к /api/ai/settings по итогу.", "result",
+                         ai::to_string(r.status));
+    if (r.status != ai::SettingsResult::Status::Ok) {
+        applog::info("ai settings request", {{"event", "tg_ai_settings"},
+                                             {"tg_user_id", link.tg_user_id},
+                                             {"method", put_body != nullptr ? "PUT" : "GET"},
+                                             {"status", ai::to_string(r.status)},
+                                             {"error", r.error}});
+    }
+    return r;
+}
+
+void Bot::handle_ai(const telegram::Update& update, const links::Link& link) {
+    auto r = ai_settings(update, link, nullptr);
+    if (!r) return; // ответ уже отправлен
+    if (r->status != ai::SettingsResult::Status::Ok) {
+        reply(update, texts::kUnavailable);
+        return;
+    }
+    AiScreen s = render_ai_screen(r->settings);
+    tg_.send_message(update.chat_id, s.text, s.keyboard);
+}
+
+void Bot::handle_ai_callback(const telegram::Update& update) {
+    bool answered = false;
+    auto answer = [&](const std::string& text, bool alert) {
+        if (answered || update.callback_id.empty()) return;
+        answered = true;
+        tg_.answer_callback(update.callback_id, text, alert);
+    };
+    std::string result = "ok";
+    auto action = callback::parse_ai(update.callback_data);
+    auto log = [&] {
+        metrics::inc_counter("tg_ai_callbacks_total", "Нажатия кнопок /ai по итогу.", "result", result);
+        applog::info("ai callback", {{"event", "tg_ai_callback"},
+                                     {"tg_user_id", update.from_id},
+                                     {"action", action ? callback::ai_kind_name(action->kind) : "-"},
+                                     {"provider", action ? action->provider : std::string{}},
+                                     {"result", result}});
+    };
+    // Подделка или мусор — пустой ответ, wallet-ai не вызывается.
+    if (!action || ai_ == nullptr) {
+        result = "bad_data";
+        log();
+        answer("", false);
+        return;
+    }
+    // Связка — на каждом нажатии: кнопку могли нажать после /unlink.
+    auto link = store_.find_link(update.from_id);
+    if (!link) {
+        result = "not_linked";
+        log();
+        answer(texts::kNotLinked, true);
+        return;
+    }
+    applog::set_user(link->user_id);
+    auto show = [&](const AiScreen& s) {
+        if (update.message_id != 0) {
+            tg_.edit_message(update.chat_id, update.message_id, s.text, s.keyboard);
+        } else {
+            tg_.send_message(update.chat_id, s.text, s.keyboard);
+        }
+    };
+
+    using K = callback::AiKind;
+    using S = ai::SettingsResult::Status;
+    std::optional<ai::SettingsResult> r;
+    if (action->kind == K::Back) {
+        r = ai_settings(update, *link, nullptr);
+    } else {
+        json body = {{"provider", action->provider}};
+        if (action->kind == K::Consent) body["consent"] = true;
+        if (action->kind == K::Revoke) body["consent"] = false;
+        r = ai_settings(update, *link, &body);
+    }
+    if (!r) {
+        result = "no_session";
+        log();
+        answer("", false); // пользователю уже ответили сообщением
+        return;
+    }
+    switch (r->status) {
+    case S::Ok:
+        show(render_ai_screen(r->settings));
+        result = action->kind == K::Back ? "back" : "saved";
+        answer(action->kind == K::Back ? "" : texts::kAiDone, false);
+        break;
+    case S::ConsentRequired:
+        // Облачный провайдер без согласия — экран согласия; выбор не изменён.
+        show(render_ai_consent(action->provider));
+        result = "consent_required";
+        answer("", false);
+        break;
+    case S::ProviderUnavailable:
+        result = "provider_unavailable";
+        answer(texts::kAiProviderNotAvailable, false);
+        break;
+    case S::Unauthorized:
+    case S::Unavailable:
+        result = "unavailable";
+        answer(texts::kUnavailable, true);
+        break;
+    }
+    log();
 }
 
 bool Bot::ai_enabled_for(const links::Link& link) {
@@ -1012,6 +1394,11 @@ void Bot::handle_callback(const telegram::Update& update) {
     // старое): черновика у него всё равно уже нет, ниже ответим «устарел».
     if (!update.chat_type.empty() && update.chat_type != "private") {
         answer("", false);
+        return;
+    }
+    // Кнопки /ai — свой строгий разбор и свои проверки (D6).
+    if (callback::is_ai(update.callback_data)) {
+        handle_ai_callback(update);
         return;
     }
     auto action = callback::parse(update.callback_data);

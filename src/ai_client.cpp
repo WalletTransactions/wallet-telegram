@@ -26,7 +26,29 @@ public:
 
     CreateResult create_parse_expense(const std::string& token, const json& input,
                                       const std::string& idempotency_key) override {
-        json body = {{"kind", "parse_expense"}, {"input", input}, {"idempotency_key", idempotency_key}};
+        return create("parse_expense", token, input, idempotency_key);
+    }
+
+    CreateResult create_chat(const std::string& token, const json& input,
+                             const std::string& idempotency_key) override {
+        return create("chat", token, input, idempotency_key);
+    }
+
+    SettingsResult get_settings(const std::string& token) override {
+        httplib::Client cli = client();
+        auto res = cli.Get("/api/ai/settings", headers(token));
+        return settings_of(res);
+    }
+
+    SettingsResult put_settings(const std::string& token, const json& body) override {
+        httplib::Client cli = client();
+        auto res = cli.Put("/api/ai/settings", headers(token), body.dump(), "application/json");
+        return settings_of(res);
+    }
+
+    CreateResult create(const char* kind, const std::string& token, const json& input,
+                        const std::string& idempotency_key) {
+        json body = {{"kind", kind}, {"input", input}, {"idempotency_key", idempotency_key}};
         httplib::Client cli = client();
         auto res = cli.Post("/api/ai/jobs", headers(token), body.dump(), "application/json");
         if (!res) {
@@ -66,6 +88,16 @@ public:
     }
 
 private:
+    static SettingsResult settings_of(const httplib::Result& res) {
+        if (!res) {
+            count_error("network");
+            SettingsResult r;
+            r.error = "wallet-ai недоступен: " + httplib::to_string(res.error());
+            return r;
+        }
+        return parse_settings_response(res->status, res->body);
+    }
+
     // Клиент на вызов: запросы короткие (бот не ждёт long-poll'ом), а у
     // httplib::Client нет гарантий на переиспользование после ошибок.
     httplib::Client client() const {
@@ -92,6 +124,7 @@ const char* to_string(CreateResult::Status s) {
     switch (s) {
     case S::Created: return "created";
     case S::Unavailable: return "unavailable";
+    case S::ProviderUnavailable: return "provider_unavailable";
     case S::Busy: return "busy";
     case S::Unauthorized: return "unauthorized";
     case S::Error: return "error";
@@ -113,6 +146,18 @@ const char* to_string(JobResult::Status s) {
     return "error";
 }
 
+const char* to_string(SettingsResult::Status s) {
+    using S = SettingsResult::Status;
+    switch (s) {
+    case S::Ok: return "ok";
+    case S::ProviderUnavailable: return "provider_unavailable";
+    case S::ConsentRequired: return "consent_required";
+    case S::Unauthorized: return "unauthorized";
+    case S::Unavailable: return "unavailable";
+    }
+    return "unavailable";
+}
+
 CreateResult parse_create_response(int http_status, const std::string& body_text) {
     CreateResult r;
     json body = json::parse(body_text, nullptr, /*allow_exceptions=*/false);
@@ -123,7 +168,8 @@ CreateResult parse_create_response(int http_status, const std::string& body_text
     }
     r.error = error_of(body, http_status);
     if (http_status == 503) {
-        r.status = CreateResult::Status::Unavailable;
+        bool provider = body.is_object() && body.value("error", std::string{}) == "provider_unavailable";
+        r.status = provider ? CreateResult::Status::ProviderUnavailable : CreateResult::Status::Unavailable;
     } else if (http_status == 429) {
         r.status = CreateResult::Status::Busy;
     } else if (http_status == 401) {
@@ -164,6 +210,35 @@ JobResult parse_job_response(int http_status, const std::string& body_text) {
         r.status = JobResult::Status::Cancelled;
     } else {
         r.error = "неизвестный статус задания: " + status;
+    }
+    return r;
+}
+
+SettingsResult parse_settings_response(int http_status, const std::string& body_text) {
+    SettingsResult r;
+    json body = json::parse(body_text, nullptr, /*allow_exceptions=*/false);
+    std::string code = body.is_object() ? body.value("error", std::string{}) : std::string{};
+    if (http_status == 200) {
+        // Без provider и списка providers экран /ai не построить — как недоступен.
+        if (body.is_object() && body.contains("provider") && body["provider"].is_string() &&
+            body.contains("providers") && body["providers"].is_array()) {
+            r.status = SettingsResult::Status::Ok;
+            r.settings = std::move(body);
+            return r;
+        }
+        r.error = "ответ /api/ai/settings без provider/providers";
+        return r;
+    }
+    r.error = error_of(body, http_status);
+    if (http_status == 400 && code == "provider_unavailable") {
+        r.status = SettingsResult::Status::ProviderUnavailable;
+    } else if (http_status == 409 && code == "consent_required") {
+        r.status = SettingsResult::Status::ConsentRequired;
+    } else if (http_status == 401) {
+        r.status = SettingsResult::Status::Unauthorized;
+    } else {
+        if (http_status != 503) count_error("http_" + std::to_string(http_status));
+        r.status = SettingsResult::Status::Unavailable;
     }
     return r;
 }

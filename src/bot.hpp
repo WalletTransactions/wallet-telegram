@@ -58,6 +58,9 @@ struct Config {
     std::string zoneinfo_dir = "/usr/share/zoneinfo";
     // Источник «сейчас» — подменяется в тестах; пусто — std::time(nullptr).
     std::function<std::time_t()> clock;
+    // Сколько ждать ответа на вопрос (задание chat), прежде чем отменить его
+    // (TG_CHAT_WAIT_SECS): дедлайн chat у wallet-ai 120 с, плюс очередь.
+    std::time_t chat_wait_secs = 150;
 };
 
 class Bot {
@@ -107,17 +110,52 @@ private:
         parser::ParsedExpense expense;
     };
     struct PendingAi {
+        // Один механизм ожидания для обоих видов (D4), итог разбирается по виду.
+        enum class Kind { ParseExpense, Chat };
+        Kind kind = Kind::ParseExpense;
         std::string job_id;
-        telegram::Update update; // сообщение с тратой — id черновика, чат, отправитель
-        std::int64_t message_id = 0; // «Разбираю…» — его и правим
+        telegram::Update update; // сообщение с тратой или вопросом — id черновика, чат, отправитель
+        std::int64_t message_id = 0; // «Разбираю…» / «Думаю…» — его и правим
         std::time_t created_at = 0;
-        AiFallback fallback;
+        AiFallback fallback; // только parse_expense
     };
     // Создаёт задание parse_expense. Создано — «Разбираю…» и запись в
     // pending_ai_; нет — сразу запасной ответ.
     void try_ai(const telegram::Update& update, const links::Link& link, const AiFallback& fallback);
     // true — с заданием покончено (итог показан), его можно забыть.
     bool process_pending_ai(PendingAi& p);
+    // Итог задания chat: ответ с подписью провайдера или текст сбоя.
+    bool process_pending_chat(PendingAi& p, const links::Link& link, std::time_t t);
+
+    // Вопрос к ИИ (спека ai-chat): задание chat в диалоге пользователя,
+    // «Думаю…» и запись в pending_ai_. edit_message_id != 0 — править это
+    // сообщение («Разбираю…» после not_expense, D3), а не слать новое.
+    // after_not_expense — ключ идемпотентности с суффиксом :chat и запасной
+    // ответ «Не понял…», если задание не создано.
+    void start_chat(const telegram::Update& update, const links::Link& link, std::int64_t edit_message_id,
+                    bool after_not_expense);
+    // Диалог пользователя в памяти бота (D5). История — в wallet-ai, здесь
+    // только номер разговора и окно ответа на уточнение.
+    struct ChatState {
+        std::int64_t seq = 0;              // conversation_id = tg-<tg_user_id>-<seq>; 0 — ещё не начат
+        std::time_t last_question_at = 0;  // сброс разговора через kChatIdleSecs без вопросов
+        std::time_t awaiting_reply_until = 0; // ответ модели кончился «?» — следующий текст в чат
+    };
+    std::string conversation_for(std::int64_t tg_user_id, std::time_t t);
+    void new_conversation(std::int64_t tg_user_id, std::time_t t);
+    bool awaiting_reply(std::int64_t tg_user_id, std::time_t t) const;
+    void handle_new(const telegram::Update& update, const links::Link& link);
+
+    // /ai (спека ai-provider-choice): экран «Сейчас отвечает: …» с кнопками
+    // провайдеров из GET /api/ai/settings.
+    void handle_ai(const telegram::Update& update, const links::Link& link);
+    // Нажатие кнопки "ai:…" (D6): строгий разбор, связка на каждом нажатии,
+    // правка того же сообщения, ровно один ответ на callback.
+    void handle_ai_callback(const telegram::Update& update);
+    // GET/PUT /api/ai/settings токеном пользователя с одним повтором на 401.
+    // nullopt — пользователю уже ответили (сессия отозвана, google-auth недоступен).
+    std::optional<ai::SettingsResult> ai_settings(const telegram::Update& update, const links::Link& link,
+                                                  const nlohmann::json* put_body);
     // edit_message_id != 0 — править это сообщение, иначе отправить новое.
     void run_fallback(const telegram::Update& update, const links::Link& link, const AiFallback& fallback,
                       std::int64_t edit_message_id);
@@ -191,6 +229,7 @@ private:
 
     ai::AiApi* ai_ = nullptr;
     std::vector<PendingAi> pending_ai_;
+    std::unordered_map<std::int64_t, ChatState> chats_;
     std::optional<bool> ai_enabled_;
     std::time_t ai_enabled_checked_at_ = 0;
 };
@@ -201,6 +240,12 @@ constexpr std::size_t kAiMaxTextBytes = 300;
 // Сколько ждать итога задания, прежде чем показать запасной ответ (дедлайн
 // генерации в wallet-ai — 60 с, плюс очередь).
 constexpr std::time_t kAiGiveUpSecs = 90;
+// Разговор с ИИ без вопросов дольше этого начинается заново — как история
+// диалога в wallet-ai (AI_CHAT_HISTORY_TTL_SECS).
+constexpr std::time_t kChatIdleSecs = 1800;
+// Окно ответа на уточнение: после ответа модели с «?» следующий текст идёт в
+// тот же диалог.
+constexpr std::time_t kChatReplyWindowSecs = 600;
 
 // Сколько живёт запись кеша справочника счетов.
 constexpr std::time_t kAccountsTtlSecs = 60;
@@ -223,7 +268,33 @@ extern const char* const kDraftStale;
 extern const char* const kAiParsing;
 extern const char* const kAiNotUnderstood;
 extern const char* const kHelpAi;
+extern const char* const kHelpAsk;
+extern const char* const kHelpAiCommands;
+extern const char* const kChatThinking;
+extern const char* const kChatTimeout;
+extern const char* const kChatProviderUnavailable;
+extern const char* const kChatOff;
+extern const char* const kChatBusy;
+extern const char* const kChatNoData;
+extern const char* const kChatRefused;
+extern const char* const kChatFailed;
+extern const char* const kChatNew;
+extern const char* const kAiNow;
+extern const char* const kAiConsent;
+extern const char* const kAiDone;
+extern const char* const kAiProviderNotAvailable;
 } // namespace texts
+
+// Экран /ai — чистая функция ради тестов: «Сейчас отвечает: <имя>», кнопки
+// доступных провайдеров («✓ » у выбранного), «Отозвать согласие» у
+// облачного с согласием. settings — AiSettings wallet-ai.
+struct AiScreen {
+    std::string text;
+    telegram::Keyboard keyboard;
+};
+AiScreen render_ai_screen(const nlohmann::json& settings);
+// Экран согласия на облачного провайдера: «Согласен» / «Отмена».
+AiScreen render_ai_consent(const std::string& provider);
 
 // Цикл long polling. Апдейты обрабатываются строго по порядку, в этом же
 // потоке: у одного экземпляра бота (replicas: 1) это и есть гарантия
