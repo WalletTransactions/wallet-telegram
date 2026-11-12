@@ -17,6 +17,11 @@
 вводе траты, `/default` и сопоставление имён (`Сопоставление имён`) видят
 одно и то же множество, а отдельных проверок по месту использования нет.
 
+Разбор — `resolver::parse_accounts` из общего кода wallet-common (вендорная
+копия в `third_party/wallet-common`), поэтому фильтр сделан там (change
+`debts` wallet-common, версия 0.1.1), а не в коде бота: копию в сервисе
+править нельзя, и тот же разбор используют wallet-ai и wallet-mcp (см. D3).
+
 *Альтернатива:* фильтровать в каждой команде. Отклонено: забытая команда
 дала бы трату с долгового кошелька.
 
@@ -27,9 +32,16 @@
 
 ### D3. Нужна ли правка в других сервисах
 
-wallet-report (поле в `/accounts`) — парный change. wallet-api, wallet-ai,
-wallet-gateway не затрагиваются. Если wallet-ai получает список кошельков
-сам, а не от бота, проверить это на реализации (задача 1.2).
+wallet-report (поле в `/accounts`) — парный change. wallet-ai получает
+список кошельков сам: `wallet-ai/src/ai.cpp` запрашивает
+`GET /api/reports/accounts` токеном пользователя, черновик траты разбирает
+его `resolver::parse_accounts` (`src/parse_expense.cpp`), импорт — тоже
+(`src/imports.cpp`, `src/import_runner.cpp`); wallet-mcp — так же
+(`src/tools.cpp`). Поэтому фильтр — в wallet-common (решение владельца
+2026-11-12), а новая копия разложена во все сервисы (`vendor.sh`). У
+wallet-mcp долговые кошельки пропадают и из `list_wallets`/`balance` и
+сопоставления имён в фильтрах — то же правило «не для трат»; wallet-gateway
+и wallet-api получают только копию.
 
 ## Risks / Trade-offs
 

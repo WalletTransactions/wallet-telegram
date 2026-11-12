@@ -207,3 +207,27 @@ TEST(resolver_names_for_parser_and_end_to_end) {
     CHECK_EQ(r.wallet.found.uuid, std::string("t-eur"));
     CHECK(r.wallet.by_currency);
 }
+
+// change debts (wallet-common 0.1.1): долговой кошелёк (counterparty_uuid не
+// null) в справочник для трат не попадает; поля нет или null — обычный.
+TEST(resolver_parse_accounts_skips_debt_wallets_and_system_categories) {
+    auto body = nlohmann::json::parse(R"({"accounts": [
+      {"uuid": "w-1", "name": "Тинькофф", "kind": "wallet", "system_kind": 0, "iso_code": "RUB", "symbol": "₽",
+       "precision": "2", "counterparty_uuid": null},
+      {"uuid": "w-2", "name": "Вася · USD", "kind": "wallet", "system_kind": 0, "iso_code": "USD", "symbol": "$",
+       "precision": "2", "counterparty_uuid": "cp-vasya"},
+      {"uuid": "w-3", "name": "Revolut", "kind": "wallet", "system_kind": 0, "iso_code": "USD", "symbol": "$",
+       "precision": "2"},
+      {"uuid": "c-1", "name": "Продукты", "kind": "category", "system_kind": 0, "counterparty_uuid": null},
+      {"uuid": "c-2", "name": "Transfer", "kind": "category", "system_kind": 1}
+    ]})");
+    auto a = resolver::parse_accounts(body);
+    CHECK(uuids(a.wallets) == (Uuids{"w-1", "w-3"}));
+    CHECK(uuids(a.categories) == (Uuids{"c-1"}));
+    // Имя долгового кошелька не попадает в имена для парсера: «@вася» не найдётся.
+    auto names = resolver::names_for_parser(a);
+    for (const auto& w : names.wallets) CHECK(w != std::string("Вася · USD"));
+    CHECK(wallet("вася", "", "", a).why == WalletPick::Why::NotFound);
+    // Сохранённый кошелёк по умолчанию — долговой: как будто не задан.
+    CHECK(wallet("", "", "w-2", a).why == WalletPick::Why::NotGiven);
+}
