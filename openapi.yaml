@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: wallet-telegram
-  version: 0.2.0
+  version: 0.2.1
   description: |
     Telegram-бот для ввода трат (org/docs/TODO_telegram_bot.md). Публичного
     API у сервиса нет: с Telegram он общается исходящими запросами (long

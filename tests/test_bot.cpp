@@ -951,6 +951,56 @@ TEST(default_sets_by_prefix_and_reports_ambiguity) {
     CHECK(h.last_reply().find("Нет кошелька «сбер»") != std::string::npos);
 }
 
+// change debts: долговой кошелёк (counterparty_uuid не null) бот не видит —
+// ни в /wallets, ни в /default, ни при выборе кошелька траты; сохранённый
+// кошелёк по умолчанию, ставший долговым, — как удалённый.
+namespace {
+
+json accounts_with_debt_json() {
+    json a = accounts_json();
+    a["accounts"].push_back({{"uuid", "w-debt"}, {"name", "Вася · USD"}, {"kind", "wallet"}, {"system_kind", 0},
+                             {"iso_code", "USD"}, {"symbol", "$"}, {"precision", "2"},
+                             {"counterparty_uuid", "cp-vasya"}});
+    return a;
+}
+
+} // namespace
+
+TEST(debt_wallet_hidden_from_wallets_default_and_expense) {
+    Harness h;
+    h.link("w-debt"); // кошелёк по умолчанию сохранён до того, как стал долговым
+    h.reports.routes = {
+        {"/api/reports/accounts", accounts_with_debt_json()},
+        {"/api/reports/balance", json::parse(R"({"accounts": [
+            {"account_uuid": "w-1", "balance": "100"},
+            {"account_uuid": "w-2", "balance": "5"},
+            {"account_uuid": "w-debt", "balance": "1000"}
+        ], "total_eq": "0", "incomplete": false, "eq_currency_uuid": "c-usd"})")},
+    };
+
+    h.bot->handle(private_message("/wallets"));
+    std::string out = h.last_reply();
+    CHECK(out.find("Тинькофф") != std::string::npos);
+    CHECK(out.find("Вася") == std::string::npos);
+    // Долговой «по умолчанию» не отмечен; подсказки /default нет — так же, как
+    // при удалённом кошельке по умолчанию (подсказка — только при пустом).
+    CHECK(out.find("★") == std::string::npos);
+
+    h.bot->handle(private_message("/default"));
+    CHECK(h.last_reply().find("не выбран") != std::string::npos);
+    CHECK(h.last_reply().find("Вася") == std::string::npos);
+    h.bot->handle(private_message("/default вася"));
+    CHECK(h.last_reply().find("Нет кошелька «вася»") != std::string::npos);
+    CHECK_EQ(h.store.links.at(kUser).default_wallet_uuid, std::string("w-debt")); // не перезаписан
+
+    // Трата без кошелька: сохранённый долговой — как не заданный, спрашиваем
+    // среди обычных.
+    h.bot->handle(expense_message("350 продукты", 41));
+    CHECK(contains(h.last_reply(), "Какой кошелёк?"));
+    CHECK_EQ(buttons(h.tg.keyboards.back()),
+             std::string("Тинькофф · ₽=41:w:0|Revolut · $=41:w:1|✕ Не записывать=41:x"));
+}
+
 TEST(tz_validates_and_saves) {
     Harness h;
     h.link();
