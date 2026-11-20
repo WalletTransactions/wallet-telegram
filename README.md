@@ -95,7 +95,14 @@ Change — [`openspec/changes/add-ai-chat`](openspec/changes/add-ai-chat/).
   `tg:<tg_user_id>:<update_id>:chat`. Чат не создан — «Не понял. Пример: …».
 - **Ответ.** Бот сразу пишет «Думаю…», потом правит это сообщение ответом с
   подписью «— LM Studio» или «— Claude»: пользователь видит, куда ушли
-  данные. Ожидание — до `TG_CHAT_WAIT_SECS` (150 с), затем отмена и «ИИ не
+  данные. Пока ответ готовится, бот показывает его по мере генерации
+  (change `chat-live-reply`): каждый тик читает события задания
+  (`GET /api/ai/jobs/{id}/events`, окно `TG_CHAT_STREAM_WINDOW_MS`, 800 мс, с
+  `Last-Event-ID`) и правит «Думаю…» накопленным текстом не чаще раза в 2 с;
+  вызов инструмента сбрасывает черновик. Итог с подписью — как раньше из
+  `GET /api/ai/jobs/{id}`. Нет потока (404/429, сбой сети, `AI_STREAM_ENABLED`
+  выключен в wallet-ai) — прежний опрос статуса; `TG_CHAT_STREAM_WINDOW_MS=0`
+  выключает. Ожидание — до `TG_CHAT_WAIT_SECS` (150 с), затем отмена и «ИИ не
   успел ответить, попробуйте позже.». Сбои: «Выбранный ИИ сейчас недоступен.
   /ai — выбрать другой.» (503 `provider_unavailable`), «ИИ сейчас
   выключен.», «ИИ занят, попробуйте через минуту.», «Не удалось получить
@@ -214,6 +221,7 @@ wallet-api), с фейковым Telegram: `bash wallet-telegram/tests_integrati
 | `tg_expense_source_total{source}` | черновики по источнику: `strict`, `llm` |
 | `tg_ai_errors_total{kind}` | ошибки запросов к wallet-ai |
 | `tg_chat_jobs_total{result}` | создание задания `chat`: `created`, `provider_unavailable`, `unavailable`, `busy`, ... |
+| `tg_chat_stream_reads_total{result}` | чтения событий хода chat: `ok`, `disabled`, `busy`, `unauthorized`, `error` |
 | `tg_chat_outcome_total{outcome}` | итог вопроса: `answer`, `failed`, `gave_up`, `expired`, `revoked`, ... |
 | `tg_chat_wait_seconds{outcome}` | от «Думаю…» до итога |
 | `tg_ai_settings_total{result}` | запросы к `/api/ai/settings`: `ok`, `consent_required`, `provider_unavailable`, `unavailable` |

@@ -72,6 +72,37 @@ public:
         return parse_job_response(res->status, res->body);
     }
 
+    EventsResult get_events(const std::string& token, const std::string& job_id, std::int64_t after_id,
+                            int window_ms) override {
+        httplib::Client cli(base_url_);
+        cli.set_connection_timeout(2, 0);
+        cli.set_read_timeout(window_ms / 1000 + 1, 0);
+        cli.set_max_timeout(window_ms); // окно прослушивания: потом соединение закрываем сами
+        httplib::Headers h = headers(token);
+        h.emplace("Accept", "text/event-stream");
+        if (after_id > 0) h.emplace("Last-Event-ID", std::to_string(after_id));
+        int status = 0;
+        std::string body;
+        auto res = cli.Get("/api/ai/jobs/" + job_id + "/events", h,
+                           [&](const httplib::Response& r) {
+                               status = r.status;
+                               return true;
+                           },
+                           [&](const char* data, std::size_t len) {
+                               if (body.size() < (1u << 20)) body.append(data, len);
+                               return true;
+                           });
+        // Окно кончилось посреди потока — не ошибка: ответ уже принят, берём
+        // накопленное.
+        if (status == 0) {
+            count_error("network");
+            EventsResult r;
+            r.error = "wallet-ai недоступен: " + (res ? std::string("нет ответа") : httplib::to_string(res.error()));
+            return r;
+        }
+        return parse_events_response(status, body);
+    }
+
     void cancel_job(const std::string& token, const std::string& job_id) override {
         httplib::Client cli = client();
         auto res = cli.Delete("/api/ai/jobs/" + job_id, headers(token));
@@ -118,6 +149,84 @@ private:
 };
 
 } // namespace
+
+std::vector<StreamEvent> parse_events_body(const std::string& raw) {
+    std::string body;
+    body.reserve(raw.size());
+    for (char c : raw) {
+        if (c != '\r') body += c; // CRLF и одиночный CR — как LF
+    }
+    std::vector<StreamEvent> out;
+    std::size_t pos = 0;
+    for (;;) {
+        std::size_t end = body.find("\n\n", pos);
+        if (end == std::string::npos) break; // хвост без пустой строки — кадр не дошёл
+        std::string frame = body.substr(pos, end - pos);
+        pos = end + 2;
+        StreamEvent ev;
+        std::string data;
+        bool has_data = false;
+        std::size_t line_start = 0;
+        while (line_start <= frame.size()) {
+            std::size_t nl = frame.find('\n', line_start);
+            std::string line = frame.substr(line_start, nl == std::string::npos ? std::string::npos : nl - line_start);
+            line_start = nl == std::string::npos ? frame.size() + 1 : nl + 1;
+            if (line.empty() || line[0] == ':') continue; // пульс
+            std::size_t colon = line.find(':');
+            std::string field = line.substr(0, colon);
+            std::string value = colon == std::string::npos ? "" : line.substr(colon + 1);
+            if (!value.empty() && value[0] == ' ') value.erase(0, 1);
+            if (field == "id") {
+                try {
+                    ev.id = std::stoll(value);
+                } catch (const std::exception&) {
+                    ev.id = 0;
+                }
+            } else if (field == "event") {
+                ev.type = value;
+            } else if (field == "data") {
+                if (has_data) data += '\n';
+                data += value;
+                has_data = true;
+            }
+        }
+        if (ev.id <= 0 || ev.type.empty()) continue; // не событие хода (комментарий, мусор)
+        ev.data = has_data ? json::parse(data, nullptr, /*allow_exceptions=*/false) : json::object();
+        if (ev.data.is_discarded()) ev.data = json::object();
+        out.push_back(std::move(ev));
+    }
+    return out;
+}
+
+EventsResult parse_events_response(int http_status, const std::string& body) {
+    EventsResult r;
+    using S = EventsResult::Status;
+    if (http_status == 200) {
+        r.status = S::Ok;
+        r.events = parse_events_body(body);
+    } else if (http_status == 404) {
+        r.status = S::Disabled;
+    } else if (http_status == 429) {
+        r.status = S::Busy;
+    } else if (http_status == 401) {
+        r.status = S::Unauthorized;
+    } else {
+        r.error = "events: http_" + std::to_string(http_status);
+    }
+    return r;
+}
+
+const char* to_string(EventsResult::Status s) {
+    using S = EventsResult::Status;
+    switch (s) {
+    case S::Ok: return "ok";
+    case S::Disabled: return "disabled";
+    case S::Busy: return "busy";
+    case S::Unauthorized: return "unauthorized";
+    case S::Error: return "error";
+    }
+    return "error";
+}
 
 const char* to_string(CreateResult::Status s) {
     using S = CreateResult::Status;

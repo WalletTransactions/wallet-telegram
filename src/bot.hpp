@@ -66,6 +66,9 @@ struct Config {
     // Сколько ждать ответа на вопрос (задание chat), прежде чем отменить его
     // (TG_CHAT_WAIT_SECS): дедлайн chat у wallet-ai 120 с, плюс очередь.
     std::time_t chat_wait_secs = 150;
+    // Окно чтения событий хода chat за один тик, мс (TG_CHAT_STREAM_WINDOW_MS,
+    // change chat-live-reply). 0 — без потока, ответ целиком опросом статуса.
+    int chat_stream_window_ms = 800;
 };
 
 class Bot {
@@ -123,6 +126,14 @@ private:
         std::int64_t message_id = 0; // «Разбираю…» / «Думаю…» — его и правим
         std::time_t created_at = 0;
         AiFallback fallback; // только parse_expense
+        // Показ ответа по мере генерации (chat-live-reply). Состояние этого
+        // задания; итог всё равно берётся из get_job.
+        std::int64_t last_event_id = 0; // Last-Event-ID следующего окна
+        std::string live_text;          // склейка delta после последнего tool
+        std::string shown_text;         // что сейчас в сообщении ("" — «Думаю…»)
+        std::time_t last_edit = 0;
+        bool no_stream = false;   // /events ответил 404 — дальше опросом статуса
+        bool stream_done = false; // пришёл done/error — пора за итогом
     };
     // Создаёт задание parse_expense. Создано — «Разбираю…» и запись в
     // pending_ai_; нет — сразу запасной ответ.
