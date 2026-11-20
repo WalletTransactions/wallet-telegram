@@ -64,6 +64,8 @@ const char* const kHelpAsk = "Можно спросить: «сколько за
 const char* const kHelpAiCommands = "/ai — кто отвечает на вопросы\n/new — новый разговор\n";
 const char* const kChatThinking = "Думаю…";
 const char* const kChatLooking = "Смотрю данные…";
+const char* const kChatThinkingBase = "Думаю";
+const char* const kChatLookingBase = "Смотрю данные";
 const char* const kChatTimeout = "ИИ не успел ответить, попробуйте позже.";
 const char* const kChatProviderUnavailable = "Выбранный ИИ сейчас недоступен. /ai — выбрать другой.";
 const char* const kChatOff = "ИИ сейчас выключен.";
@@ -1147,6 +1149,7 @@ void Bot::start_chat(const telegram::Update& update, const links::Link& link, st
     p.job_id = created.job_id;
     p.update = update;
     p.created_at = t;
+    p.last_edit = t; // «Думаю…» только что показано: точки побегут через kLiveEditSecs
     if (edit_message_id != 0) {
         tg_.edit_message(update.chat_id, edit_message_id, texts::kChatThinking, {});
         p.message_id = edit_message_id;
@@ -1180,6 +1183,27 @@ bool Bot::process_pending_chat(PendingAi& p, const links::Link& link, std::time_
     };
     bool give_up = t - p.created_at >= config_.chat_wait_secs;
 
+    // Что сейчас в сообщении: накопленный текст ответа, а пока его нет —
+    // «Думаю» (после вызова инструмента — «Смотрю данные») с бегущими точками
+    // для ощущения работы. Правка не чаще раза в kLiveEditSecs (лимит Telegram)
+    // и только при изменении (иначе Telegram: «message is not modified»);
+    // первый кусок текста показывается без паузы.
+    auto refresh = [&]() {
+        std::string desired;
+        if (!p.live_text.empty()) {
+            desired = p.live_text;
+        } else {
+            std::size_t dots = static_cast<std::size_t>((t - p.created_at) / kLiveEditSecs) % 3 + 1;
+            desired = std::string(p.tool_seen ? texts::kChatLookingBase : texts::kChatThinkingBase) + std::string(dots, '.');
+        }
+        bool first_text = !p.live_text.empty() && !p.text_shown;
+        if (desired == p.shown_text || (!first_text && t - p.last_edit < kLiveEditSecs)) return;
+        show(desired);
+        p.shown_text = desired;
+        p.last_edit = t;
+        if (!p.live_text.empty()) p.text_shown = true;
+    };
+
     // Ответ по мере генерации (chat-live-reply): короткое окно чтения событий
     // и правка сообщения. true — задание ещё генерирует, статус опрашивать
     // рано; false — потока нет или он кончился, дальше обычный опрос.
@@ -1200,16 +1224,7 @@ bool Bot::process_pending_chat(PendingAi& p, const links::Link& link, std::time_
             }
             else if (e.type == "done" || e.type == "error") p.stream_done = true;
         }
-        // Правка не чаще раза в kLiveEditSecs (лимит Telegram) и только при
-        // изменении (иначе Telegram отвечает «message is not modified»).
-        // Пока текста нет: «Думаю…», а после вызова инструмента — «Смотрю данные…».
-        const std::string desired = !p.live_text.empty() ? p.live_text : (p.tool_seen ? std::string("\x01") : std::string());
-        if (!p.stream_done && desired != p.shown_text && t - p.last_edit >= kLiveEditSecs) {
-            show(!p.live_text.empty() ? p.live_text
-                                      : std::string(p.tool_seen ? texts::kChatLooking : texts::kChatThinking));
-            p.shown_text = desired;
-            p.last_edit = t;
-        }
+        if (!p.stream_done) refresh();
         return !p.stream_done;
     };
 
@@ -1236,7 +1251,10 @@ bool Bot::process_pending_chat(PendingAi& p, const links::Link& link, std::time_
     switch (job.status) {
     case S::Pending:
     case S::Error:
-        if (!give_up) return false;
+        if (!give_up) {
+            refresh(); // точки у «Думаю…» (и в запасном режиме, без потока)
+            return false;
+        }
         ai_->cancel_job(token, p.job_id); // ошибки отмены глотает клиент
         show(texts::kChatTimeout);
         return finish("gave_up", job.error);

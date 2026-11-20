@@ -2057,7 +2057,7 @@ TEST(chat_live_reply_tool_resets_draft) {
     CHECK_EQ(h.tg.edits.back().text, std::string("Сейчас посмотрю"));
     h.now += 2;
     h.bot->ai_tick();
-    CHECK_EQ(h.tg.edits.back().text, std::string(bot::texts::kChatLooking)); // черновик не ответ, ждём ответ после инструмента
+    CHECK_EQ(h.tg.edits.back().text, std::string("Смотрю данные..")); // черновик не ответ; точки бегут
     // Ответ после инструмента заменяет статус.
     h.ai.events_script = {FakeAi::window({FakeAi::ev(3, "delta", {{"text", "Готово"}})})};
     h.now += 2;
@@ -2101,4 +2101,29 @@ TEST(chat_live_reply_busy_or_error_polls_status_and_window_zero_disables) {
     CHECK(off.ai.events_after.empty());
     CHECK_EQ(off.ai.gets.size(), 1u);
     CHECK(off.tg.edits.empty());
+}
+
+TEST(chat_thinking_dots_run_while_waiting) {
+    AiHarness h; // потока нет: опрос статуса, точки всё равно бегут
+    h.bot->handle(expense_message("сколько за няню в сентябре?", 90));
+    h.ai.job_next = job(ai::JobResult::Status::Pending);
+    h.bot->ai_tick();
+    CHECK(h.tg.edits.empty()); // «Думаю…» только что показано
+    h.now += 1;
+    h.bot->ai_tick();
+    CHECK(h.tg.edits.empty()); // чаще раза в 2 с не правим (лимит Telegram)
+    h.now += 1; // 2 с
+    h.bot->ai_tick();
+    REQUIRE(h.tg.edits.size() == 1u);
+    CHECK_EQ(h.tg.edits.back().text, std::string("Думаю.."));
+    h.now += 2;
+    h.bot->ai_tick();
+    CHECK_EQ(h.tg.edits.back().text, std::string("Думаю..."));
+    h.now += 2;
+    h.bot->ai_tick();
+    CHECK_EQ(h.tg.edits.back().text, std::string("Думаю.")); // по кругу
+    // Ответ заменяет точки итогом с подписью.
+    h.ai.job_next = job(ai::JobResult::Status::Done, chat_answer("1000.00 EUR."));
+    h.bot->ai_tick();
+    CHECK_EQ(h.tg.edits.back().text, std::string("1000.00 EUR.\n\n— LM Studio"));
 }
