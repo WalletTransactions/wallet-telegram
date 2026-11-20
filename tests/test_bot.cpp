@@ -2057,7 +2057,12 @@ TEST(chat_live_reply_tool_resets_draft) {
     CHECK_EQ(h.tg.edits.back().text, std::string("Сейчас посмотрю"));
     h.now += 2;
     h.bot->ai_tick();
-    CHECK_EQ(h.tg.edits.back().text, std::string(bot::texts::kChatThinking)); // черновик не ответ
+    CHECK_EQ(h.tg.edits.back().text, std::string(bot::texts::kChatLooking)); // черновик не ответ, ждём ответ после инструмента
+    // Ответ после инструмента заменяет статус.
+    h.ai.events_script = {FakeAi::window({FakeAi::ev(3, "delta", {{"text", "Готово"}})})};
+    h.now += 2;
+    h.bot->ai_tick();
+    CHECK_EQ(h.tg.edits.back().text, std::string("Готово"));
 }
 
 TEST(chat_live_reply_no_stream_falls_back_to_polling) {
