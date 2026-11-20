@@ -130,7 +130,8 @@ private:
         // задания; итог всё равно берётся из get_job.
         std::int64_t last_event_id = 0; // Last-Event-ID следующего окна
         std::string live_text;          // склейка delta после последнего tool
-        std::string shown_text;         // что сейчас в сообщении ("" — «Думаю…»)
+        std::string shown_text;         // что сейчас в сообщении ("" — «Думаю…», "\x01" — «Смотрю данные…»)
+        bool tool_seen = false;         // был вызов инструмента: пока текста нет, статус «Смотрю данные…»
         std::time_t last_edit = 0;
         bool no_stream = false;   // /events ответил 404 — дальше опросом статуса
         bool stream_done = false; // пришёл done/error — пора за итогом
@@ -287,6 +288,7 @@ extern const char* const kHelpAi;
 extern const char* const kHelpAsk;
 extern const char* const kHelpAiCommands;
 extern const char* const kChatThinking;
+extern const char* const kChatLooking; // после первого вызова инструмента (chat-live-reply)
 extern const char* const kChatTimeout;
 extern const char* const kChatProviderUnavailable;
 extern const char* const kChatOff;

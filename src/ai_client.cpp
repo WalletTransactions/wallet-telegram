@@ -1,5 +1,7 @@
 #include "ai_client.hpp"
 
+#include <algorithm>
+
 #include "httplib.h"
 #include "util/log.hpp"
 #include "util/metrics.hpp"
@@ -76,14 +78,16 @@ public:
                             int window_ms) override {
         httplib::Client cli(base_url_);
         cli.set_connection_timeout(2, 0);
-        cli.set_read_timeout(window_ms / 1000 + 1, 0);
-        cli.set_max_timeout(window_ms); // окно прослушивания: потом соединение закрываем сами
+        cli.set_read_timeout(window_ms / 1000 + 2, 0);
+        // wallet-ai закрывает поток по window_ms сам (слот освобождается сразу);
+        // max_timeout — страховка на случай старого wallet-ai без параметра.
+        cli.set_max_timeout(window_ms + 1000);
         httplib::Headers h = headers(token);
         h.emplace("Accept", "text/event-stream");
         if (after_id > 0) h.emplace("Last-Event-ID", std::to_string(after_id));
         int status = 0;
         std::string body;
-        auto res = cli.Get("/api/ai/jobs/" + job_id + "/events", h,
+        auto res = cli.Get("/api/ai/jobs/" + job_id + "/events?window_ms=" + std::to_string(std::max(100, window_ms)), h,
                            [&](const httplib::Response& r) {
                                status = r.status;
                                return true;
