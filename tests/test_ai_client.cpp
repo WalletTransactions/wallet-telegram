@@ -75,3 +75,31 @@ TEST(ai_settings_response) {
     CHECK(ai::parse_settings_response(200, R"({"provider":"lmstudio"})").status ==
           ai::SettingsResult::Status::Unavailable);
 }
+
+TEST(ai_events_body_and_response) {
+    std::string body =
+        "id: 1\nevent: tool\ndata: {\"name\":\"balance\",\"outcome\":\"ok\"}\n\n"
+        ": ping\n\n"
+        "id: 2\nevent: delta\ndata: {\"text\":\"Привет\"}\n\n"
+        "id: 3\nevent: delta\ndata: {\"te"; // оборванный хвост — кадр не дошёл
+    auto events = ai::parse_events_body(body);
+    REQUIRE(events.size() == 2u);
+    CHECK_EQ(events[0].id, 1);
+    CHECK_EQ(events[0].type, std::string("tool"));
+    CHECK_EQ(events[0].data["name"].get<std::string>(), std::string("balance"));
+    CHECK_EQ(events[1].data["text"].get<std::string>(), std::string("Привет"));
+
+    // CRLF и мусорные data не роняют разбор.
+    auto crlf = ai::parse_events_body("id: 5\r\nevent: done\r\ndata: not json\r\n\r\n");
+    REQUIRE(crlf.size() == 1u);
+    CHECK_EQ(crlf[0].id, 5);
+    CHECK(crlf[0].data.is_object());
+    CHECK(ai::parse_events_body("").empty());
+
+    using S = ai::EventsResult::Status;
+    CHECK(ai::parse_events_response(200, body).status == S::Ok);
+    CHECK(ai::parse_events_response(404, "").status == S::Disabled);
+    CHECK(ai::parse_events_response(429, "").status == S::Busy);
+    CHECK(ai::parse_events_response(401, "").status == S::Unauthorized);
+    CHECK(ai::parse_events_response(502, "").status == S::Error);
+}

@@ -130,6 +130,8 @@ int main() {
     // Ожидание ответа на вопрос к ИИ (add-ai-chat, D4): дедлайн chat у
     // wallet-ai 120 с плюс очередь.
     config.chat_wait_secs = std::stol(env_or("TG_CHAT_WAIT_SECS", "150"));
+    // Ответ по мере генерации (chat-live-reply): окно чтения событий за тик, мс; 0 — выкл.
+    config.chat_stream_window_ms = std::max(0, std::stoi(env_or("TG_CHAT_STREAM_WINDOW_MS", "800")));
 
     // Одно соединение, не пул: к базе ходит только поток поллинга, по одному
     // апдейту за раз.

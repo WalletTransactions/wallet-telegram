@@ -133,6 +133,8 @@ namespace {
 // Telegram режет сообщения длиннее 4096 символов; байты UTF-8 ≥ символов,
 // поэтому с запасом.
 constexpr std::size_t kMaxMessageBytes = 4000;
+// Правка сообщения с черновиком ответа не чаще (Telegram режет правки одного чата).
+constexpr std::time_t kLiveEditSecs = 2;
 constexpr int kLastDefault = 10;
 constexpr int kLastMax = 30;
 
@@ -1177,6 +1179,33 @@ bool Bot::process_pending_chat(PendingAi& p, const links::Link& link, std::time_
     };
     bool give_up = t - p.created_at >= config_.chat_wait_secs;
 
+    // Ответ по мере генерации (chat-live-reply): короткое окно чтения событий
+    // и правка сообщения. true — задание ещё генерирует, статус опрашивать
+    // рано; false — потока нет или он кончился, дальше обычный опрос.
+    auto stream_step = [&](const std::string& access_token) {
+        if (config_.chat_stream_window_ms <= 0 || p.no_stream || p.stream_done || give_up) return false;
+        ai::EventsResult ev = ai_->get_events(access_token, p.job_id, p.last_event_id, config_.chat_stream_window_ms);
+        metrics::inc_counter("tg_chat_stream_reads_total", "Чтения событий хода chat ботом по итогу.", "result",
+                             ai::to_string(ev.status));
+        using ES = ai::EventsResult::Status;
+        if (ev.status == ES::Disabled) p.no_stream = true; // выключен или задание истекло: узнает get_job
+        if (ev.status != ES::Ok) return false;
+        for (const auto& e : ev.events) {
+            p.last_event_id = std::max(p.last_event_id, e.id);
+            if (e.type == "delta") p.live_text += e.data.value("text", std::string{});
+            else if (e.type == "tool") p.live_text.clear(); // черновик перед инструментом — не ответ
+            else if (e.type == "done" || e.type == "error") p.stream_done = true;
+        }
+        // Правка не чаще раза в kLiveEditSecs (лимит Telegram) и только при
+        // изменении (иначе Telegram отвечает «message is not modified»).
+        if (!p.stream_done && p.live_text != p.shown_text && t - p.last_edit >= kLiveEditSecs) {
+            show(p.live_text.empty() ? std::string(texts::kChatThinking) : p.live_text);
+            p.shown_text = p.live_text;
+            p.last_edit = t;
+        }
+        return !p.stream_done;
+    };
+
     ai::JobResult job;
     std::string token;
     for (int attempt = 0; attempt < 2; ++attempt) {
@@ -1191,6 +1220,7 @@ bool Bot::process_pending_chat(PendingAi& p, const links::Link& link, std::time_
             return finish("gave_up");
         }
         token = access.token;
+        if (stream_step(token)) return false; // ответ ещё генерируется, показан черновик
         job = ai_->get_job(token, p.job_id);
         if (job.status != ai::JobResult::Status::Unauthorized) break;
     }

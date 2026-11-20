@@ -1285,6 +1285,28 @@ public:
         return r;
     }
 
+    // Чтение событий хода chat: сценарий по окнам; пусто — «потока нет» (404).
+    ai::EventsResult get_events(const std::string&, const std::string&, std::int64_t after_id, int) override {
+        events_after.push_back(after_id);
+        if (events_script.empty()) {
+            ai::EventsResult r;
+            r.status = ai::EventsResult::Status::Disabled;
+            return r;
+        }
+        ai::EventsResult r = events_script.front();
+        events_script.erase(events_script.begin());
+        return r;
+    }
+    static ai::EventsResult window(std::vector<ai::StreamEvent> events) {
+        ai::EventsResult r;
+        r.status = ai::EventsResult::Status::Ok;
+        r.events = std::move(events);
+        return r;
+    }
+    static ai::StreamEvent ev(std::int64_t id, const std::string& type, json data) { return {id, type, std::move(data)}; }
+    std::vector<ai::EventsResult> events_script;
+    std::vector<std::int64_t> events_after;
+
     std::vector<Create> chat_creates;
     ai::CreateResult chat_create_next = created("chat-1");
     int settings_gets = 0;
@@ -1989,4 +2011,89 @@ TEST(chat_reply_window_after_imperative_answer) {
     h.ai.job_next = job(ai::JobResult::Status::Done, {{"outcome", "not_expense"}});
     h.bot->ai_tick();
     CHECK(contains(h.tg.edits.back().text, "Не понял сумму"));
+}
+
+// ---- Ответ по мере генерации (change chat-live-reply) ----
+
+TEST(chat_live_reply_draft_grows_then_final_answer) {
+    AiHarness h;
+    h.bot->handle(expense_message("сколько за няню в сентябре?", 80));
+    h.ai.job_next = job(ai::JobResult::Status::Pending);
+    h.ai.events_script = {FakeAi::window({FakeAi::ev(1, "delta", {{"text", "За сентябрь"}})}),
+                          FakeAi::window({}),
+                          FakeAi::window({FakeAi::ev(2, "delta", {{"text", " — 2899.00 EUR."}})})};
+    h.bot->ai_tick(); // первое окно: черновик
+    REQUIRE(!h.tg.edits.empty());
+    CHECK_EQ(h.tg.edits.back().text, std::string("За сентябрь"));
+    CHECK(h.ai.gets.empty()); // пока поток идёт, статус не опрашивается
+    size_t edits_after_first = h.tg.edits.size();
+    h.bot->ai_tick(); // пустое окно, то же время — правок нет
+    CHECK_EQ(h.tg.edits.size(), edits_after_first);
+    h.now += 2;
+    h.bot->ai_tick(); // прошло 2 с — черновик растёт
+    CHECK_EQ(h.tg.edits.back().text, std::string("За сентябрь — 2899.00 EUR."));
+    // Окна продолжают с последнего принятого id.
+    CHECK_EQ(h.ai.events_after.size(), 3u);
+    CHECK_EQ(h.ai.events_after[0], 0);
+    CHECK_EQ(h.ai.events_after[1], 1);
+    CHECK_EQ(h.ai.events_after[2], 1);
+
+    // done в потоке — идём за итогом в get_job: подпись провайдера.
+    h.ai.events_script = {FakeAi::window({FakeAi::ev(3, "done", json::object())})};
+    h.ai.job_next = job(ai::JobResult::Status::Done, chat_answer("За сентябрь — 2899.00 EUR."));
+    h.bot->ai_tick();
+    CHECK(!h.bot->has_pending_ai());
+    CHECK_EQ(h.tg.edits.back().text, std::string("За сентябрь — 2899.00 EUR.\n\n— LM Studio"));
+    CHECK_EQ(h.tg.sent.size(), 1u); // сообщение одно, правится
+}
+
+TEST(chat_live_reply_tool_resets_draft) {
+    AiHarness h;
+    h.bot->handle(expense_message("сколько за няню?", 81));
+    h.ai.job_next = job(ai::JobResult::Status::Pending);
+    h.ai.events_script = {FakeAi::window({FakeAi::ev(1, "delta", {{"text", "Сейчас посмотрю"}})}),
+                          FakeAi::window({FakeAi::ev(2, "tool", {{"name", "balance"}, {"outcome", "ok"}})})};
+    h.bot->ai_tick();
+    CHECK_EQ(h.tg.edits.back().text, std::string("Сейчас посмотрю"));
+    h.now += 2;
+    h.bot->ai_tick();
+    CHECK_EQ(h.tg.edits.back().text, std::string(bot::texts::kChatThinking)); // черновик не ответ
+}
+
+TEST(chat_live_reply_no_stream_falls_back_to_polling) {
+    AiHarness h; // events_script пуст: /events отвечает 404
+    h.bot->handle(expense_message("сколько за няню в сентябре?", 82));
+    h.ai.job_next = job(ai::JobResult::Status::Pending);
+    h.bot->ai_tick();
+    h.bot->ai_tick();
+    CHECK_EQ(h.ai.events_after.size(), 1u); // 404 запомнен на задание: больше не спрашиваем
+    CHECK_EQ(h.ai.gets.size(), 2u);         // статус опрашивается как раньше
+    CHECK(h.tg.edits.empty());
+    h.ai.job_next = job(ai::JobResult::Status::Done, chat_answer("1000.00 EUR."));
+    h.bot->ai_tick();
+    CHECK_EQ(h.tg.edits.back().text, std::string("1000.00 EUR.\n\n— LM Studio"));
+}
+
+TEST(chat_live_reply_busy_or_error_polls_status_and_window_zero_disables) {
+    AiHarness h;
+    h.bot->handle(expense_message("сколько за няню в сентябре?", 83));
+    ai::EventsResult busy;
+    busy.status = ai::EventsResult::Status::Busy;
+    h.ai.events_script = {busy};
+    h.ai.job_next = job(ai::JobResult::Status::Pending);
+    h.bot->ai_tick();
+    CHECK_EQ(h.ai.gets.size(), 1u); // 429: этот тик — опрос статуса
+
+    // Окно 0 — поток выключен: событий не запрашиваем, статус опрашиваем.
+    AiHarness off;
+    off.config.chat_stream_window_ms = 0;
+    off.rebuild();
+    off.bot->enable_ai(&off.ai);
+    off.bot->handle(expense_message("сколько за няню в сентябре?", 84));
+    off.ai.job_next = job(ai::JobResult::Status::Pending);
+    off.ai.events_script = {FakeAi::window({FakeAi::ev(1, "delta", {{"text", "x"}})})};
+    off.bot->ai_tick();
+    CHECK(off.ai.events_after.empty());
+    CHECK_EQ(off.ai.gets.size(), 1u);
+    CHECK(off.tg.edits.empty());
 }
