@@ -167,6 +167,17 @@ Telegram недоступен на старте — предупреждение
 Служебные ручки на `:8086`: `/healthz`, `/version`, `/metrics`, `/openapi.yaml`, `/docs`.
 Через wallet-gateway бот не публикуется.
 
+## Взаимный TLS к google-auth (необязательно)
+
+Change `add-internal-mtls` (wallet-infra). Заданы `TLS_CERT`, `TLS_KEY`, `TLS_CA`
+(сертификат бота и корень CA контура; все три или ни одной) — вызовы `/internal/*`
+идут к служебному TLS-порту google-auth по `https` с клиентским сертификатом, CN
+которого — `wallet-telegram`. Сертификат сервера проверяется по CA контура и по
+имени из `AUTH_INTERNAL_URL` (например `https://google-auth-internal:8443`). Не
+заданы — обычный HTTP, как раньше. Задано не всё или файлы нечитаемы — ошибка
+старта. В журнале старта поле `auth_mtls`. Ответ 403 от google-auth (сервис не из
+списка разрешённых) бот считает недоступностью и связку не трогает.
+
 ## Запуск в compose
 
 1. Роль, база и схема: добавьте `TELEGRAM_POSTGRES_*` в `infra/db/.env` (см.

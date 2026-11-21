@@ -153,7 +153,22 @@ int main() {
     links::PgLinkStore store(*database);
     auto tg = telegram::make_http_api(strip_trailing_slash(env_or("TELEGRAM_API_URL", "https://api.telegram.org")),
                                       bot_token);
-    auto auth_api = auth::make_http_api(auth_service_url, service_secret);
+    // Взаимный TLS к служебному порту google-auth (change add-internal-mtls, шаг 4): задан
+    // TLS_CERT/TLS_KEY/TLS_CA — вызовы /internal/* идут по https с клиентским сертификатом.
+    // Задано не всё или файлы нечитаемы — ошибка старта (не молчаливый возврат на HTTP).
+    auto tls_loaded = nettls::config_from_env();
+    if (!tls_loaded.error.empty()) {
+        applog::error(tls_loaded.error);
+        return 1;
+    }
+    if (tls_loaded.config.enabled()) {
+        std::string tls_error;
+        if (!nettls::make_client(auth_service_url, tls_loaded.config, &tls_error)) {
+            applog::error(tls_error);
+            return 1;
+        }
+    }
+    auto auth_api = auth::make_http_api(auth_service_url, service_secret, tls_loaded.config);
     auto reports_api = reports::make_http_api(wallet_report_url, "tg_reports_errors_total");
     auto wallet_api = wallet::make_http_api(wallet_api_url);
     bot::Bot bot(*tg, *auth_api, *reports_api, *wallet_api, store, config);
@@ -199,6 +214,7 @@ int main() {
                   {"bot_username", config.bot_username},
                   {"allowlist_size", config.allowed_user_ids.size()},
                   {"auth_service_url", auth_service_url},
+                  {"auth_mtls", tls_loaded.config.enabled()},
                   {"wallet_report_url", wallet_report_url},
                   {"wallet_api_url", wallet_api_url},
                   {"wallet_ai_url", wallet_ai_url}});

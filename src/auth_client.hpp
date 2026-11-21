@@ -8,6 +8,8 @@
 // (5 мин) токен со scope reports:read expense:write.
 #pragma once
 
+#include "net/tls.hpp"
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -54,6 +56,10 @@ public:
 
 // base_url — AUTH_SERVICE_URL (http://google-auth:8080), service_secret —
 // TELEGRAM_SERVICE_SECRET, тот же, что в google-auth/.env.
-std::unique_ptr<AuthApi> make_http_api(const std::string& base_url, const std::string& service_secret);
+// tls — TLS_CERT/TLS_KEY/TLS_CA (net/tls из wallet-common): заданы — https, клиентский
+// сертификат, проверка CA контура и имени сервера (add-internal-mtls, служебный порт
+// google-auth); пусто — обычный HTTP, как раньше.
+std::unique_ptr<AuthApi> make_http_api(const std::string& base_url, const std::string& service_secret,
+                                       const nettls::Config& tls = {});
 
 } // namespace auth

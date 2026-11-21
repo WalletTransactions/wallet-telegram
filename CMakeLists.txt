@@ -77,6 +77,7 @@ add_library(wallet_telegram_core STATIC
     ${WALLET_COMMON_DIR}/util/dotenv.cpp
     ${WALLET_COMMON_DIR}/util/hex.cpp
     ${WALLET_COMMON_DIR}/util/log.cpp
+    ${WALLET_COMMON_DIR}/net/tls.cpp
     ${WALLET_COMMON_DIR}/util/metrics.cpp
     ${WALLET_COMMON_DIR}/util/pg_recover.cpp
     src/util/tz.cpp
