@@ -115,6 +115,12 @@ int main() {
     // TODO_telegram_tokens.md). Оставшаяся в .env строка просто игнорируется.
     std::string auth_service_url = strip_trailing_slash(
         env_required("AUTH_SERVICE_URL", "адрес google-auth напрямую, не через гейтвей, например http://127.0.0.1:8080"));
+    // Служебный порт google-auth для /internal/* (change add-internal-mtls, D11,
+    // сеть auth-internal). Пусто или не задан — прежний AUTH_SERVICE_URL.
+    {
+        std::string internal_url = strip_trailing_slash(env_or("AUTH_INTERNAL_URL", ""));
+        if (!internal_url.empty()) auth_service_url = internal_url;
+    }
     std::string wallet_report_url = strip_trailing_slash(env_required(
         "WALLET_REPORT_URL", "адрес wallet-report напрямую, не через гейтвей, например http://127.0.0.1:8084"));
     std::string wallet_api_url = strip_trailing_slash(env_required(
