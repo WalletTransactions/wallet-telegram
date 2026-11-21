@@ -8,6 +8,8 @@
 // черновики бота однопоточны.
 #pragma once
 
+#include "net/tls.hpp"
+
 #include <memory>
 #include <optional>
 #include <cstdint>
@@ -133,6 +135,6 @@ public:
     virtual std::optional<bool> enabled(const std::string& token) = 0;
 };
 
-std::unique_ptr<AiApi> make_http_api(const std::string& base_url);
+std::unique_ptr<AiApi> make_http_api(const std::string& base_url, const nettls::Config& tls = {});
 
 } // namespace ai
