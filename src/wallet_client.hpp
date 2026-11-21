@@ -8,6 +8,8 @@
 // тем же batch_id безопасен — его делает пользователь кнопкой.
 #pragma once
 
+#include "net/tls.hpp"
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -58,6 +60,6 @@ PushResult parse_push_response(int http_status, const std::string& body);
 // Для логов и метрик: "ok", "already_exists", ...
 const char* status_name(PushResult::Status status);
 
-std::unique_ptr<WalletApi> make_http_api(const std::string& base_url);
+std::unique_ptr<WalletApi> make_http_api(const std::string& base_url, const nettls::Config& tls = {});
 
 } // namespace wallet

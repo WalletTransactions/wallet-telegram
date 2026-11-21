@@ -18,11 +18,11 @@ void count_error(const std::string& kind) {
 
 class HttpWalletApi final : public WalletApi {
 public:
-    explicit HttpWalletApi(const std::string& base_url) : base_url_(base_url) {}
+    HttpWalletApi(const std::string& base_url, nettls::Config tls) : base_url_(base_url), tls_(std::move(tls)) {}
 
     PushResult push_expense(const Expense& e, const std::string& access_token) override {
         // Клиент на вызов, как в reports_client.cpp.
-        httplib::Client client(base_url_);
+        httplib::Client client = nettls::client_value(base_url_, tls_);
         client.set_connection_timeout(5, 0);
         client.set_read_timeout(15, 0);
 
@@ -49,6 +49,7 @@ public:
 
 private:
     std::string base_url_;
+    nettls::Config tls_;
 };
 
 } // namespace
@@ -124,8 +125,8 @@ const char* status_name(PushResult::Status status) {
     return "unknown";
 }
 
-std::unique_ptr<WalletApi> make_http_api(const std::string& base_url) {
-    return std::make_unique<HttpWalletApi>(base_url);
+std::unique_ptr<WalletApi> make_http_api(const std::string& base_url, const nettls::Config& tls) {
+    return std::make_unique<HttpWalletApi>(base_url, tls);
 }
 
 } // namespace wallet

@@ -169,15 +169,15 @@ int main() {
         }
     }
     auto auth_api = auth::make_http_api(auth_service_url, service_secret, tls_loaded.config);
-    auto reports_api = reports::make_http_api(wallet_report_url, "tg_reports_errors_total");
-    auto wallet_api = wallet::make_http_api(wallet_api_url);
+    auto reports_api = reports::make_http_api(wallet_report_url, "tg_reports_errors_total", nettls::internal_client_config(nettls::settings_from_env()));
+    auto wallet_api = wallet::make_http_api(wallet_api_url, nettls::internal_client_config(nettls::settings_from_env()));
     bot::Bot bot(*tg, *auth_api, *reports_api, *wallet_api, store, config);
     // Свободный текст через wallet-ai (org/docs/TODO_wallet_ai.md, шаг 4).
     // Пусто — ИИ выключен, бот работает как без него.
     std::string wallet_ai_url = strip_trailing_slash(env_or("WALLET_AI_URL", ""));
     std::unique_ptr<ai::AiApi> ai_api;
     if (!wallet_ai_url.empty()) {
-        ai_api = ai::make_http_api(wallet_ai_url);
+        ai_api = ai::make_http_api(wallet_ai_url, nettls::internal_client_config(nettls::settings_from_env()));
         bot.enable_ai(ai_api.get());
     }
     // Меню команд по «/» (add-command-menu). Telegram недоступен на старте —
@@ -191,7 +191,22 @@ int main() {
 
     std::string host = env_or("HOST", "127.0.0.1");
     int port = std::stoi(env_or("PORT", "8086"));
-    httplib::Server svr;
+    // Взаимный TLS внутри контура (change add-internal-mtls, шаг 7): INTERNAL_MTLS=true — сервер
+    // требует клиентский сертификат от CA контура; иначе обычный HTTP, как раньше. Неполные TLS_*
+    // или нечитаемые файлы — ошибка старта, а не молчаливый возврат на HTTP.
+    auto tls_settings = nettls::settings_from_env();
+    if (!tls_settings.error.empty()) {
+        applog::error(tls_settings.error);
+        return 1;
+    }
+    std::string tls_error;
+    auto svr_owner = nettls::make_server(nettls::server_config(tls_settings), &tls_error);
+    if (!svr_owner) {
+        applog::error(tls_error);
+        return 1;
+    }
+    httplib::Server& svr = *svr_owner;
+    if (tls_settings.serve) applog::info("mTLS: сервер требует клиентский сертификат (INTERNAL_MTLS=true)");
     docsapi::register_routes(svr);
     svr.set_logger([](const httplib::Request& req, const httplib::Response& res) {
         // Только служебные ручки, поэтому route — сам путь (кардинальность

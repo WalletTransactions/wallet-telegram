@@ -24,7 +24,7 @@ void count_error(const std::string& kind) {
 
 class HttpAiApi final : public AiApi {
 public:
-    explicit HttpAiApi(std::string base_url) : base_url_(std::move(base_url)) {}
+    HttpAiApi(std::string base_url, nettls::Config tls) : base_url_(std::move(base_url)), tls_(std::move(tls)) {}
 
     CreateResult create_parse_expense(const std::string& token, const json& input,
                                       const std::string& idempotency_key) override {
@@ -76,7 +76,7 @@ public:
 
     EventsResult get_events(const std::string& token, const std::string& job_id, std::int64_t after_id,
                             int window_ms) override {
-        httplib::Client cli(base_url_);
+        httplib::Client cli = nettls::client_value(base_url_, tls_);
         cli.set_connection_timeout(2, 0);
         cli.set_read_timeout(window_ms / 1000 + 2, 0);
         // wallet-ai закрывает поток по window_ms сам (слот освобождается сразу);
@@ -136,7 +136,7 @@ private:
     // Клиент на вызов: запросы короткие (бот не ждёт long-poll'ом), а у
     // httplib::Client нет гарантий на переиспользование после ошибок.
     httplib::Client client() const {
-        httplib::Client cli(base_url_);
+        httplib::Client cli = nettls::client_value(base_url_, tls_);
         cli.set_connection_timeout(2, 0);
         cli.set_read_timeout(10, 0); // создание задания ходит в wallet-report за справочником
         return cli;
@@ -150,6 +150,7 @@ private:
     }
 
     std::string base_url_;
+    nettls::Config tls_;
 };
 
 } // namespace
@@ -356,6 +357,8 @@ SettingsResult parse_settings_response(int http_status, const std::string& body_
     return r;
 }
 
-std::unique_ptr<AiApi> make_http_api(const std::string& base_url) { return std::make_unique<HttpAiApi>(base_url); }
+std::unique_ptr<AiApi> make_http_api(const std::string& base_url, const nettls::Config& tls) {
+    return std::make_unique<HttpAiApi>(base_url, tls);
+}
 
 } // namespace ai
